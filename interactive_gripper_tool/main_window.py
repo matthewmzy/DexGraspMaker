@@ -1,5 +1,5 @@
 # main_window.py
-
+import numpy as np
 import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -7,124 +7,10 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
 
-# -------------------------------------------------------------------
-# [占位符] - 开始
-# -------------------------------------------------------------------
-# 我们将导入的（尚未实现的）类放在 try/except 块中。
-# 这样，即使这些文件还不存在，main_window.py 也能被理解和运行。
-# 当我们实现这些文件后，真正的类将被导入。
-# -------------------------------------------------------------------
-
-try:
-    from vista_widget import VistaWidget
-except ImportError:
-    print("提示：正在使用 'VistaWidget' 的占位符。")
-    class VistaWidget(QFrame):
-        """VistaWidget 的占位符"""
-        # 定义一个空的信号，以便 connect_signals 不会出错
-        point_picked_signal = pyqtSignal(dict)
-        
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            self.setLayout(QVBoxLayout())
-            self.label = QLabel(f"占位符：\n{self.__class__.__name__}\n(3D 视窗)")
-            self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Sunken)
-            self.layout().addWidget(self.label)
-        
-        # 定义空的槽函数，以便 connect_signals 不会出错
-        def load_mesh(self, *args, **kwargs):
-            self.label.setText(f"{self.label.text()}\n- 已加载物体")
-        
-        def load_hand(self, *args, **kwargs):
-            self.label.setText(f"{self.label.text()}\n- 已加载机械手")
-            
-        def update_hand_pose(self, pose_dict: dict):
-            # 这个会被高频调用，所以不打印
-            pass 
-        
-        def set_actor_properties(self, *args, **kwargs): pass
-        def enable_picking(self, enable: bool):
-             self.label.setText(f"{self.label.text()}\n- 拾取模式: {enable}")
-
-try:
-    from controls_widget import ControlsWidget
-except ImportError:
-    print("提示：正在使用 'ControlsWidget' 的占位符。")
-    class ControlsWidget(QFrame):
-        """ControlsWidget 的占位符"""
-        load_object_signal = pyqtSignal()
-        load_hand_signal = pyqtSignal()
-        start_picking_signal = pyqtSignal(bool)
-        visualization_settings_changed_signal = pyqtSignal(dict)
-        manual_joint_changed_signal = pyqtSignal(str, float)
-        
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            self.setLayout(QHBoxLayout())
-            label = QLabel("占位符：ControlsWidget (工具栏)")
-            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.setFrameStyle(QFrame.Shape.StyledPanel | QFrame.Shadow.Sunken)
-            self.setMinimumHeight(100)
-            self.layout().addWidget(label)
-
-try:
-    from data_manager import DataManager
-except ImportError:
-    print("提示：正在使用 'DataManager' 的占位符。")
-    class DataManager(QObject):
-        """DataManager 的占位符"""
-        object_loaded_signal = pyqtSignal(object)
-        hand_loaded_signal = pyqtSignal(dict)
-        new_anchor_pair_signal = pyqtSignal(list)
-        # 我们需要一个信号来告诉主窗口何时切换拾取模式
-        picking_mode_changed_signal = pyqtSignal(bool)
-
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            self._picking_mode = False
-            
-        def load_object(self): print("DataManager: (占位符) 触发加载物体")
-        def load_hand(self): print("DataManager: (占位符) 触发加载机械手")
-        def set_picking_mode(self, is_active: bool):
-            print(f"DataManager: (占位符) 设置拾取模式为 {is_active}")
-            self._picking_mode = is_active
-            self.picking_mode_changed_signal.emit(is_active)
-        def on_object_point_picked(self, pick_data: dict): pass
-        def on_hand_point_picked(self, pick_data: dict): pass
-        def on_manual_joint_change(self, joint_name: str, value: float): pass
-
-try:
-    from optimization_thread import OptimizationThread
-except ImportError:
-    print("提示：正在使用 'OptimizationThread' 的占位符。")
-    class OptimizationThread(QThread):
-        """OptimizationThread 的占位符"""
-        pose_update_signal = pyqtSignal(dict)
-        
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            self._is_running = True
-            
-        def run(self):
-            print("OptimizationThread: (占位符) 优化线程已启动。")
-            while self._is_running:
-                self.msleep(500) # 保持线程活动
-        
-        def stop(self):
-            print("OptimizationThread: (占位符) 停止线程。")
-            self._is_running = False
-            self.quit()
-            
-        def trigger_optimization(self, anchor_pairs: list):
-            print(f"OptimizationThread: (占位符) 收到 {len(anchor_pairs)} 个锚点，触发优化。")
-        
-        def set_manual_joint(self, joint_name: str, value: float):
-            pass
-
-# -------------------------------------------------------------------
-# [占位符] - 结束
-# -------------------------------------------------------------------
+from vista_widget import VistaWidget
+from controls_widget import ControlsWidget
+from data_manager import DataManager
+from optimization_thread import OptimizationThread
 
 
 class MainWindow(QMainWindow):
@@ -144,6 +30,10 @@ class MainWindow(QMainWindow):
         
         # 3. 连接所有组件的信号和槽
         self.connect_signals()
+
+        # [新增] 将状态栏消息连接到 QMainWindow 的 statusBar
+        self.statusBar().showMessage("欢迎使用可交互式机械手位姿匹配工具")
+        self.data_manager.status_message_signal.connect(self.statusBar().showMessage)
         
         # 4. 启动后端线程
         print("启动优化线程...")
@@ -188,8 +78,8 @@ class MainWindow(QMainWindow):
         top_splitter.addWidget(self.view_center)
         top_splitter.addWidget(self.view_right)
         
-        # 设置初始大小比例：中间的(核心)视窗是左右两边的2倍宽
-        top_splitter.setSizes([200, 400, 200])
+        # 设置初始大小比例： 左:中:右 = 300:500:300
+        top_splitter.setSizes([300, 500, 300])
 
         # --- 底部工具栏 ---
         self.controls_widget = ControlsWidget(self)
@@ -203,7 +93,7 @@ class MainWindow(QMainWindow):
         main_splitter.addWidget(self.controls_widget)
         
         # 设置初始大小比例：3D视图占 80% 的高度
-        main_splitter.setSizes([800, 200])
+        main_splitter.setSizes([600, 400])
 
         # 4. 将主分割器添加到中心小部件的布局中
         main_layout.addWidget(main_splitter)
@@ -216,7 +106,7 @@ class MainWindow(QMainWindow):
         """
         print("连接信号与槽...")
 
-        # --- 流程 1: 加载文件 ---
+        # --- 流程 1a: 加载文件 ---
         # 控件 (按钮) -> 数据管理器 (处理逻辑)
         self.controls_widget.load_object_signal.connect(self.data_manager.load_object)
         self.controls_widget.load_hand_signal.connect(self.data_manager.load_hand)
@@ -235,6 +125,15 @@ class MainWindow(QMainWindow):
         self.data_manager.hand_loaded_signal.connect(
             lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_") # 中间，动态
         )
+        self.data_manager.hand_initial_pose_signal.connect(self.on_hand_initial_pose_received)
+
+        # --- 流程 1b: 将加载的数据连接到 UI 控件 ---
+        # DataManager (加载成功) -> ControlsWidget (更新UI)
+        self.data_manager.anchor_list_updated_signal.connect(self.controls_widget.update_anchor_list)
+        self.data_manager.hand_joint_info_signal.connect(self.controls_widget.create_joint_controls)
+        
+        # --- 流程 1c: 将 JAX Robot 模型发送到后端 ---
+        self.data_manager.pyroki_robot_loaded_signal.connect(self.optimization_thread.set_pyroki_robot)
 
         # --- 流程 2: 锚点拾取 ---
         # 控件 (按钮) -> 数据管理器 (切换状态)
@@ -299,6 +198,34 @@ class MainWindow(QMainWindow):
             )
         
         # 可以在此处扩展颜色等其他设置...
+
+    def on_hand_initial_pose_received(self, poses_dict: dict[str, np.ndarray]) -> None:
+        """
+        槽：当 DataManager 加载完机械手并发出其默认姿态时调用。
+        """
+        if not poses_dict:
+            return
+            
+        print("MainWindow: 收到初始姿态，正在更新视窗...")
+        
+        # 1. 更新右侧 (静态) 视窗
+        #    (poses_dict 的键是 'link_name', 这与 view_right 的 actor 名称匹配)
+        self.view_right.update_hand_pose(poses_dict)
+        
+        # 2. 更新中间 (动态) 视窗
+        #    (需要为 actor 名称添加 'dyn_hand_' 前缀)
+        dyn_poses = {}
+        for link_name, pose_matrix in poses_dict.items():
+            actor_name = "dyn_hand_" + link_name
+            dyn_poses[actor_name] = pose_matrix
+            
+        self.view_center.update_hand_pose(dyn_poses)
+        
+        # 3. (重要!) 移动 actor 之后重置相机
+        self.view_right.plotter.reset_camera()
+        self.view_center.plotter.reset_camera()
+        
+        print("MainWindow: 视窗姿态已更新。")
 
     def closeEvent(self, event) -> None:
         """

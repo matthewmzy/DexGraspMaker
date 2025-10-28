@@ -92,12 +92,13 @@ class VistaWidget(QWidget):
         print(f"VistaWidget: 已加载 actor '{name}'。")
 
     def load_hand(self, links_dict_data: dict[str, pyvista.PolyData], 
-                  name_prefix: str = "", **kwargs) -> None:
+                  name_prefix: str = "", camera_reset: bool = True, **kwargs) -> None: # [修改] 1. 添加 camera_reset 参数
         """
         加载一个由多个 link 组成的机械手。
         
         :param links_dict_data: 字典 {link_name: mesh_data}
         :param name_prefix: 添加到 actor 名称的前缀 (例如 'dyn_hand_')
+        :param camera_reset: [新增] 是否在加载最后一个 link 后重置相机
         :param kwargs: 传递给 load_mesh 的其他参数 (例如 color, opacity)
         """
         print(f"VistaWidget: 正在加载机械手，前缀: '{name_prefix}'...")
@@ -115,7 +116,7 @@ class VistaWidget(QWidget):
             self.load_mesh(
                 mesh_data, 
                 name=actor_name, 
-                camera_reset=is_last,
+                camera_reset=(is_last and camera_reset),
                 **kwargs
             )
         
@@ -139,7 +140,7 @@ class VistaWidget(QWidget):
         actor = self.actors[name]
         
         # PyVista actor 可以直接接受一个 4x4 NumPy 数组作为其 'user_transform'
-        actor.user_transform = pose_matrix
+        actor.user_matrix = pose_matrix
 
     def update_hand_pose(self, link_poses_dict: dict[str, np.ndarray]) -> None:
         """

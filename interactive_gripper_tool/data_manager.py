@@ -9,20 +9,10 @@ from PyQt6.QtWidgets import QFileDialog
 # [依赖项导入]
 # -------------------------------------------------------------------
 
-try:
-    import pyvista
-except ImportError:
-    print("错误：'pyvista' 库未找到。请运行: pip install pyvista")
-    # 模拟一个 PolyData 类，以便代码在语法上有效
-    class PolyData: pass
-    pyvista = type('PyVistaMock', (object,), {'PolyData': PolyData, 'read': lambda: None, 'wrap': lambda: None})()
-
-try:
-    import trimesh
-except ImportError:
-    print("错误：'trimesh' 库未找到。请运行: pip install trimesh")
-    # 模拟 trimesh
-    trimesh = type('TrimeshMock', (object,), {'load': lambda: None, 'Scene': type('Scene', (object,), {})})()
+import pyvista
+import trimesh
+import yourdfpy
+import pyroki as pk
 
 # -------------------------------------------------------------------
 
@@ -55,6 +45,13 @@ class DataManager(QObject):
     # 信号 5: （可选）状态栏消息
     status_message_signal = pyqtSignal(str) # (用于提示用户)
 
+    # 信号 6: 将 JAX-native 的 pyroki robot 对象发送给优化线程
+    pyroki_robot_loaded_signal = pyqtSignal(object) # 发射 pk.Robot 实例
+
+    # 信号 7: 加载 URDF 成功后，将 link 的初始姿态字典发射出去
+    # {link_name: np.ndarray(4,4)}
+    hand_initial_pose_signal = pyqtSignal(dict)
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         
@@ -64,11 +61,14 @@ class DataManager(QObject):
         self.object_mesh: pyvista.PolyData | None = None
         self.hand_links_mesh_dict: dict[str, pyvista.PolyData] = {}
         self.joint_info: list[dict] = []
+
+        # 2. 存储 pyroki robot 实例
+        self.pyroki_robot: pk.Robot | None = None
         
-        # 2. 锚点状态
+        # 3. 锚点状态
         self.anchor_pairs: list[dict] = []
-        
-        # 3. 拾取状态机
+
+        # 4. 拾取状态机
         self.is_picking_mode: bool = False
         self._current_pick_stage: str = 'hand' # 'hand' 或 'object'
         self._temp_hand_anchor: dict | None = None # 存储临时的手部点信息
@@ -95,6 +95,9 @@ class DataManager(QObject):
             self.object_mesh = pyvista.read(file_path)
             print(f"DataManager: 已加载物体: {file_path}")
             # 发射信号，将 mesh 数据传递给视窗
+            if max(self.object_mesh.bounds_size) > 10: # 简单检查单位
+                print("DataManager: 物体尺寸较大，正在缩放至米级单位...")
+                self.object_mesh.scale(0.001, inplace=True)
             self.object_loaded_signal.emit(self.object_mesh)
             self.status_message_signal.emit(f"已加载物体: {file_path}")
         except Exception as e:
@@ -105,93 +108,154 @@ class DataManager(QObject):
     def load_hand(self) -> None:
         """
         打开文件对话框以加载机械手 URDF。
-        这将解析 URDF，提取 link 的 meshes 和 joint 的信息。
+        1. 使用 yourdfpy 加载 URDF (它会处理 'package://' 并加载 meshes)。
+        2. 使用 pyroki 创建 JAX-native 的 Robot 对象。
+        3. 提取可视化 meshes 发送给 PyVista。
+        4. 提取关节信息发送给 ControlsWidget。
+        5. 发送 pyroki.Robot 对象给 OptimizationThread。
         """
         file_path, _ = QFileDialog.getOpenFileName(
-            None, 
-            "加载机械手 URDF", 
-            "", 
-            "URDF 文件 (*.urdf)"
+            None, "加载机械手 URDF", "", "URDF 文件 (*.urdf)"
         )
         
-        if not file_path:
-            return # 用户取消
+        if not file_path: return
             
         try:
-            # 1. 使用 trimesh 加载 URDF
-            # trimesh 会自动加载所有关联的 mesh (stl, dae, obj...)
-            # 它返回一个 trimesh.Scene 对象
+            # 1. 使用 yourdfpy 加载 URDF
+            # yourdfpy 会自动处理 package:// 路径并加载 trimesh 场景
+            print(f"DataManager: 正在使用 yourdfpy 加载: {file_path}")
+            urdf_obj = yourdfpy.URDF.load(file_path)
             
-            # URDFs 经常使用 'package://' 路径，我们需要提供一个解析器
-            # 我们假设 mesh 文件位于 URDF 文件的相对目录中
-            urdf_url = QUrl.fromLocalFile(file_path)
-            
-            def resolve_package_path(path):
-                # 简单的解析器：假设 'package://' 指向 URDF 文件的父目录
-                if path.startswith('package://'):
-                    # TBD: 这部分可能需要根据实际的包结构进行调整
-                    # 一个更健壮的实现会搜索 ROS_PACKAGE_PATH
-                    base_dir = QUrl(urdf_url).adjusted(QUrl.UrlFormattingOption.RemoveFilename)
-                    # 移除 'package://' 和包名 (假设包名是第一个路径组件)
-                    relative_path = "/".join(path.split('/')[2:]) 
-                    resolved_url = base_dir.resolved(QUrl(relative_path))
-                    return resolved_url.toLocalFile()
-                return path
+            # 2. 使用 pyroki 创建 JAX-native Robot
+            print("DataManager: 正在创建 pyroki.Robot 实例...")
+            self.pyroki_robot = pk.Robot.from_urdf(urdf_obj)
+            print("DataManager: pyroki.Robot 创建成功。")
 
-            # trimesh.load 返回一个 Scene 对象
-            scene = trimesh.load(file_path, file_resolver=resolve_package_path)
+            # 3. 提取 Link Meshes (用于 PyVista 可视化)
+            trimesh_scene = urdf_obj.scene
+            if trimesh_scene is None:
+                raise ValueError("yourdfpy 未能加载场景 (urdf_obj.scene 为空)。")
 
-            # 2. 提取 Link Meshes (几何)
             self.hand_links_mesh_dict.clear()
             
-            # 遍历场景图，找到哪个节点(link)对应哪个几何体(mesh)
-            for link_name, geom_key in scene.graph.nodes_geometry.items():
-                trimesh_mesh = scene.geometry[geom_key]
+            scene_graph = trimesh_scene.graph
+            transform_graph = scene_graph.transforms
+            all_node_data = scene_graph.transforms.node_data
+
+            geometry_dict = trimesh_scene.geometry
+
+            # debug_tm_scene = trimesh.Scene()
+
+            for link_name in self.pyroki_robot.links.names:
+                if link_name not in transform_graph.nodes:
+                    print(f"DataManager: 警告: Pyroki link '{link_name}' 不在 trimesh 场景图中。")
+                    continue
+
+                link_meshes = []
+                # 查找作为此 link_name 子节点的所有 "visual" 节点
+                # (link_name) -> (visual_name)
+                child_nodes = [to_node for from_node, to_node in transform_graph.edge_data if from_node == link_name]
+                for child_node_name in child_nodes:
+                    # 从 all_node_data (而不是 graph) 访问节点数据
+                    if child_node_name in all_node_data and "geometry" in all_node_data[child_node_name]:
+                        
+                        geom_key = all_node_data[child_node_name]["geometry"]
+                        if geom_key not in geometry_dict:
+                            print(f"DataManager: 警告: 找不到 '{geom_key}' (来自 {child_node_name}) 的几何体。")
+                            continue
+                            
+                        trimesh_geom = geometry_dict[geom_key]
+                        
+                        transform_matrix = scene_graph.get(child_node_name, link_name)[0]
+
+                        if hasattr(trimesh_geom, 'to_mesh'):
+                            # 如果是 Box, Sphere, Cylinder，调用 .to_mesh()
+                            trimesh_mesh = trimesh_geom.to_mesh()
+                        else:
+                            trimesh_mesh = trimesh_geom.copy()
+
+                        trimesh_mesh.apply_transform(transform_matrix)
+                        link_meshes.append(trimesh_mesh)
+
+                if not link_meshes:
+                    continue # 此 link 没有可视化 meshes
                 
-                # 将 trimesh.Trimesh 转换为 pyvista.PolyData
-                # 我们需要确保 trimesh_mesh 是 Trimesh 对象，而不是 Path3D 等
-                if isinstance(trimesh_mesh, trimesh.Trimesh):
-                    pv_mesh = pyvista.wrap(trimesh_mesh)
-                    self.hand_links_mesh_dict[link_name] = pv_mesh
+                # 将此 link 的所有 visual meshes 合并为一个
+                if len(link_meshes) > 1:
+                    combined_mesh = trimesh.util.concatenate(link_meshes)
                 else:
-                    print(f"DataManager: 跳过非 Mesh 的几何体 '{link_name}' (类型: {type(trimesh_mesh)})")
+                    combined_mesh = link_meshes[0]
+
+                # debug_tm_scene.add_geometry(combined_mesh)
+
+                # 转换为 PyVista 并存储
+                pv_mesh = pyvista.wrap(combined_mesh)
+                self.hand_links_mesh_dict[link_name] = pv_mesh
+
+            # debug_tm_scene.show()
 
             if not self.hand_links_mesh_dict:
-                raise ValueError("未能在 URDF 中找到任何可加载的 link meshes。")
+                raise ValueError("未能在 URDF 场景中提取任何 link meshes。")
 
-            print(f"DataManager: 已加载 {len(self.hand_links_mesh_dict)} 个 link meshes。")
+            print(f"DataManager: 已提取 {len(self.hand_links_mesh_dict)} 个 link meshes。")
             self.hand_loaded_signal.emit(self.hand_links_mesh_dict)
 
-            # 3. 提取 Joint 信息
+            # 4. 提取 Joint 信息 (用于 ControlsWidget 滑块)
             self.joint_info.clear()
+            pyroki_joints = self.pyroki_robot.joints
             
-            # trimesh (如果安装了 urdfpy) 会将 urdf 对象存储在元数据中
-            if '_loaded_urdf' in scene.metadata:
-                urdf_robot = scene.metadata['_loaded_urdf']
-                for joint in urdf_robot.joints:
-                    if joint.joint_type in ['revolute', 'prismatic']:
-                        info = {
-                            'name': joint.name,
-                            'min': -np.pi * 2, # 默认值
-                            'max': np.pi * 2,  # 默认值
-                            'default': 0.0
-                        }
-                        if joint.limit:
-                            info['min'] = joint.limit.lower if joint.limit.lower is not None else -np.pi * 2
-                            info['max'] = joint.limit.upper if joint.limit.upper is not None else np.pi * 2
-                        
-                        # 确保 min < max
-                        if info['min'] >= info['max']:
-                            info['min'] = -np.pi * 2
-                            info['max'] = np.pi * 2
+            # pyroki.joints.lower_limits/upper_limits 已经是被驱动关节的列表
+            # 我们需要从 yourdfpy 中获取它们的名字以保持一致
+            actuated_names = urdf_obj.actuated_joint_names
 
-                        self.joint_info.append(info)
-            else:
-                print("DataManager: 警告: 未安装 'urdfpy'。无法加载关节限制信息。")
-                print("DataManager: 请运行: pip install urdfpy")
+            if len(actuated_names) != pyroki_joints.num_actuated_joints:
+                print(f"DataManager: 警告: 'yourdfpy' ({len(actuated_names)} joints) 和 'pyroki' ({pyroki_joints.num_actuated_joints} joints) 的驱动关节数量不匹配。")
+                # 这种情况不应该发生，但作为后备
+                if pyroki_joints.num_actuated_joints > 0:
+                     actuated_names = [f"joint_{i}" for i in range(pyroki_joints.num_actuated_joints)]
+                else:
+                    raise ValueError("未找到驱动关节。")
 
-            print(f"DataManager: 已找到 {len(self.joint_info)} 个可动关节。")
+            for i, joint_name in enumerate(actuated_names):
+                lower = float(pyroki_joints.lower_limits[i])
+                upper = float(pyroki_joints.upper_limits[i])
+                info = {
+                    'name': joint_name,
+                    'min': lower,
+                    'max': upper,
+                    'default': (lower + upper) / 2.0
+                }
+                self.joint_info.append(info)
+
+            print(f"DataManager: 已提取 {len(self.joint_info)} 个可动关节信息。")
             self.hand_joint_info_signal.emit(self.joint_info)
+            
+            # 5. 发射 JAX-native robot
+            self.pyroki_robot_loaded_signal.emit(self.pyroki_robot)
+
+            # 6. 计算并
+            print("DataManager: 正在计算初始姿态 (Default FK)...")
+            initial_poses = {}
+            base_link_name = urdf_obj.base_link
+            scene_graph = urdf_obj.scene.graph
+
+            # 我们需要为 hand_links_mesh_dict 中的每个 link 计算其全局姿态
+            # 注意：urdf_obj.scene.graph 已经包含了默认姿态的变换
+            for link_name in self.hand_links_mesh_dict.keys():
+                try:
+                    # 获取 T_world_link (其中 'world' 是 base_link)
+                    transform_matrix = scene_graph.get(link_name, base_link_name)[0]
+                    initial_poses[link_name] = transform_matrix
+                except:
+                    # 这可能发生在 link_name == base_link_name 时
+                    if link_name == base_link_name:
+                        initial_poses[link_name] = np.eye(4)
+                    else:
+                        print(f"DataManager: 警告: 无法获取 '{link_name}' 相对于 '{base_link_name}' 的变换。")
+            
+            print(f"DataManager: 已计算 {len(initial_poses)} 个 links 的初始姿态。")
+            # 发射初始姿态
+            self.hand_initial_pose_signal.emit(initial_poses)
             
             self.status_message_signal.emit(f"已加载机械手: {file_path}")
 
@@ -220,20 +284,34 @@ class DataManager(QObject):
     @pyqtSlot(dict)
     def on_hand_point_picked(self, pick_data: dict) -> None:
         """
-        槽：当 [右侧] 静态手视窗被点击时调用。
-        :param pick_data: {'actor_name': str, 'world_coord': [x, y, z]}
+        [修正] 确保 actor_name (来自 vista_widget) 的前缀被正确剥离。
         """
         if not (self.is_picking_mode and self._current_pick_stage == 'hand'):
-            return # 状态不正确，忽略
-            
-        # 1. 存储临时锚点信息
-        self._temp_hand_anchor = pick_data
+            return
         
-        # 2. 转换状态
+        actor_name = pick_data['actor_name']
+        
+        # main_window 中设置了前缀 "static_hand_"
+        prefix = "static_hand_" 
+        if actor_name.startswith(prefix):
+             link_name = actor_name[len(prefix):]
+        else:
+             print(f"DataManager: 警告: 拾取到的 actor '{actor_name}' 没有预期的 '{prefix}' 前缀。")
+             link_name = actor_name
+
+        # 检查此 link_name 是否在我们的 mesh 字典中 (即它是否真的被加载了)
+        if link_name not in self.hand_links_mesh_dict:
+             print(f"DataManager: 错误: 拾取到的 link '{link_name}' 不在已加载的 meshes 列表中。")
+             self.status_message_signal.emit(f"错误: 拾取到未知 link '{link_name}'。")
+             return
+
+        self._temp_hand_anchor = {
+            'world_coord': pick_data['world_coord'],
+            'link_name': link_name
+        }
         self._current_pick_stage = 'object'
-        
-        print(f"DataManager: 已拾取手部点: {pick_data}")
-        self.status_message_signal.emit(f"已选定手部点 ({pick_data['actor_name']})。请在 [左侧] 视窗点击物体上的对应点。")
+        print(f"DataManager: 已拾取手部点: {self._temp_hand_anchor}")
+        self.status_message_signal.emit(f"已选定手部点 ({link_name})。请在 [左侧] 视窗点击物体上的对应点。")
 
     @pyqtSlot(dict)
     def on_object_point_picked(self, pick_data: dict) -> None:

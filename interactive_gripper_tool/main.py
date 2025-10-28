@@ -3,21 +3,8 @@
 import sys
 from PyQt6.QtWidgets import QApplication
 
-# 导入我们（尚未实现的）主窗口类
-# 我们假设 'main_window.py' 文件中会定义一个名为 'MainWindow' 的类
-try:
-    from main_window import MainWindow
-except ImportError:
-    print("错误：无法从 'main_window.py' 导入 'MainWindow'。")
-    print("请确保该文件存在并且类名正确。")
-    # 暂时创建一个占位符类以便程序能运行（仅用于演示）
-    if 'MainWindow' not in globals():
-        from PyQt6.QtWidgets import QMainWindow, QLabel
-        class MainWindow(QMainWindow):
-            def __init__(self):
-                super().__init__()
-                self.setCentralWidget(QLabel("占位符：MainWindow 未实现"))
-                self.resize(800, 600)
+from main_window import MainWindow
+
 
 def main():
     """

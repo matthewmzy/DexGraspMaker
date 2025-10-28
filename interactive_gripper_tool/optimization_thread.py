@@ -3,8 +3,11 @@
 import time
 import numpy as np
 from PyQt6.QtCore import (
-    QThread, QMutex, QWaitCondition, pyqtSignal, pyqtSlot, QMutexLocker
+    QThread, QMutex, QWaitCondition, pyqtSignal, pyqtSlot, QMutexLocker, QObject
 )
+import pyroki as pk
+import jaxlie
+from jax import numpy as jnp
 
 # -------------------------------------------------------------------
 # [占位符] - 辅助函数 (Numpy-based)
@@ -59,10 +62,9 @@ class OptimizationThread(QThread):
         self._manual_update = False      # 手动关节更新的开关
 
         # --- 状态变量 (由 mutex 保护) ---
-        
-        # 1. 机器人模型
-        self.link_names: list[str] = [] # e.g., ['base_link', 'link_1', ...]
-        self.joint_info: list[dict] = [] # e.g., [{'name': 'j1', 'min': -1, 'max': 1, 'default': 0}]
+
+        # 1. 存储 JAX-native 机器人模型
+        self.robot: pk.Robot | None = None
         
         # 2. 锚点
         self.anchor_pairs: list[dict] = []
@@ -163,7 +165,7 @@ class OptimizationThread(QThread):
                 # 这是您调用 JAX/PyTorch FK 的地方
                 
                 # `_mock_forward_kinematics` 只是模拟FK
-                link_poses_dict = self._mock_forward_kinematics(
+                link_poses_dict = self._run_forward_kinematics(
                     new_pose, 
                     new_joints
                 )
@@ -213,23 +215,40 @@ class OptimizationThread(QThread):
                 
             self.wait_condition.wakeAll() # 唤醒 'run' 循环
 
-    @pyqtSlot(dict, list)
-    def set_hand_model(self, links_mesh_dict: dict, joint_info_list: list) -> None:
+    @pyqtSlot(object)
+    def set_pyroki_robot(self, robot: pk.Robot) -> None:
         """
-        槽：当加载新机械手时，由 data_manager 调用。
-        (注意：我们假设 main_window 会连接这个)
+        槽：当 data_manager 加载完 URDF 后调用。
         """
         with QMutexLocker(self.mutex):
-            self.link_names = list(links_mesh_dict.keys())
-            self.joint_info = joint_info_list
+            if pk is None:
+                print("OptimizationThread: 错误: pyroki 未导入，无法设置 robot。")
+                return
+
+            self.robot = robot
+            if self.robot is None:
+                print("OptimizationThread: 警告: 收到了空的 Robot 对象。")
+                return
+
+            # 从 pyroki robot 初始化关节状态
+            self.current_joint_values.clear()
+            self.target_joint_values.clear()
             
-            # 重置/初始化优化状态
-            self.current_base_pose = np.eye(4)
-            self.current_joint_values = {j['name']: j['default'] for j in self.joint_info}
-            self.target_joint_values = self.current_joint_values.copy()
-            
-            print(f"OptimizationThread: 已设置机械手模型: {len(self.link_names)} links, {len(self.joint_info)} joints.")
-            
+            try:
+                joint_names = self.robot.joints.actuated_names
+                lower_limits = self.robot.joints.lower_limits
+                upper_limits = self.robot.joints.upper_limits
+
+                for i, name in enumerate(joint_names):
+                    default_val = (float(lower_limits[i]) + float(upper_limits[i])) / 2.0
+                    self.current_joint_values[name] = default_val
+                    self.target_joint_values[name] = default_val
+                
+                print(f"OptimizationThread: 已成功设置 pyroki.Robot 实例。 关节: {list(self.current_joint_values.keys())}")
+            except Exception as e:
+                print(f"OptimizationThread: 解析 pyroki.Robot 时出错: {e}")
+                self.robot = None # 设置失败
+
             # 加载新模型后，如果存在锚点，则触发一次优化
             if self.anchor_pairs:
                 self._needs_optimization = True
@@ -248,11 +267,9 @@ class OptimizationThread(QThread):
                 
                 self.wait_condition.wakeAll() # 唤醒 'run' 循环以应用FK
 
-    # --- 占位符 (Mock) 方法 ---
-    #
     # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-    # ▼▼▼▼▼▼ [用户: 用您自己的 JAX / PyTorch 代码替换以下方法] ▼▼▼▼▼▼
-    # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+    # ▼▼▼▼▼▼ [用户: 这是你唯一需要替换的函数] ▼▼▼▼▼▼
+    # ▼▼▼▼▼▼▼T▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 
     def _mock_optimization_step(self, 
                                 anchors: list[dict], 
@@ -262,54 +279,40 @@ class OptimizationThread(QThread):
         """
         [占位符] 模拟一步优化。
         
-        您的实现应该：
-        1. 使用 'current_pose' 和 'current_joints'。
-        2. 使用 'anchors' 列表计算损失 (loss)。
-        3. 计算梯度 (grads)。
-        4. 使用 Adam/Optimizer 更新 'current_pose' 和 'current_joints'。
-        5. 返回 (new_pose, new_joints)。
+        这是你实现 JAX 梯度下降的地方。
         
-        --- 模拟逻辑 ---
-        这个模拟只是简单地将 base_pose 缓慢移向第一个锚点的目标位置，
-        并轻微摆动第一个关节。
+        你的真实 JAX JIT 函数 (`_jax_step`) 将会使用:
+        1. `self.robot` (你的 `pk.Robot` 实例)
+        2. `self.current_base_pose` (你需要将其转为 jaxlie.SE3)
+        3. `self.current_joint_values` (你需要将其转为 jnp.array)
+        4. `self.anchor_pairs` (你需要将其转为 JAX 数组,
+           特别是包含 hand_point 的局部坐标和 hand_link_name 对应的 link_index)
+        
+        --- 模拟逻辑 (保持不变) ---
         """
-        
-        # 复制以避免修改原始值
         new_pose = current_pose.copy()
         new_joints = current_joints.copy()
         
-        if not anchors:
+        if not anchors or self.robot is None:
             return new_pose, new_joints
             
         # 1. 模拟关节优化
-        if new_joints:
-            first_joint_name = list(new_joints.keys())[0]
-            # 只是一个简单的摆动
-            new_joints[first_joint_name] = np.sin(time.time() * 2) * 0.5 
+        first_joint_name = self.robot.joints.actuated_names[0]
+        new_joints[first_joint_name] = np.sin(time.time() * 2) * 0.5 
 
         # 2. 模拟位姿优化
-        # 目标：将 'hand_point' (在世界系中) 移动到 'obj_point'
-        # (这是一个*错误*的假设，hand_point 应该在 link 坐标系中，
-        #  但对于模拟来说这足够了)
-        
-        # 我们用 FK 计算出手部点在世界坐标系中的当前位置
-        # (模拟：假设 'hand_point' 在 'current_pose' 的局部坐标中)
         hand_point_local = np.array(anchors[0]['hand_point'] + [1])
         hand_point_world = (current_pose @ hand_point_local)[:3]
-        
         obj_point_world = np.array(anchors[0]['obj_point'])
-        
-        # 计算误差
         error = obj_point_world - hand_point_world
-        
-        # 向目标移动 5%
-        learning_rate = 0.05
-        translation_update = error * learning_rate
-        
-        # 应用更新
+        translation_update = error * 0.05
         new_pose[0:3, 3] += translation_update
 
         return new_pose, new_joints
+
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+    # ▲▲▲▲▲▲ [用户: 替换以上方法] ▲▲▲▲▲▲
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
     def _mock_forward_kinematics(self, 
                                  base_pose: np.ndarray, 
@@ -366,47 +369,107 @@ class OptimizationThread(QThread):
     # ▲▲▲▲▲▲ [用户: 替换以上方法] ▲▲▲▲▲▲
     # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
+    def _run_forward_kinematics(self, 
+                                base_pose_mat: np.ndarray, 
+                                joint_values_dict: dict[str, float]
+                                ) -> dict[str, np.ndarray]:
+        """
+        [真实实现] 使用 pyroki 运行正向运动学 (FK)。
+        
+        这个函数用于*可视化*，所以它在 QThread 中运行，
+        但不需要在 JAX @jit 内部。
+        """
+        if self.robot is None or jaxlie is None:
+            if self.robot is None: print("FK GZ: Robot not set")
+            if jaxlie is None: print("FK GZ: Jaxlie not set")
+            return {}
+
+        try:
+            # 1. 将关节字典 {name: val} 转换为有序数组 [val1, val2, ...]
+            ordered_joint_names = self.robot.joints.actuated_names
+            
+            # 确保 joint_values_dict 已经包含了所有需要的关节
+            if not all(name in joint_values_dict for name in ordered_joint_names):
+                # print("FK 警告: 关节值尚未完全初始化。")
+                return {} # 尚未准备好
+
+            cfg_array = jnp.array(
+                [joint_values_dict[name] for name in ordered_joint_names]
+            )
+
+            # 2. 调用 pyroki FK。返回 (link_count, 7)
+            link_poses_rel_root_wxyz = self.robot.forward_kinematics(cfg_array)
+            
+            # 3. 获取优化的基座位姿 (4x4 NumPy -> jaxlie.SE3)
+            T_world_base = jaxlie.SE3.from_matrix(base_pose_mat)
+            
+            # 4. 转换并应用基座位姿
+            link_poses_dict = {}
+            link_names = self.robot.links.names # pyroki 存储的 link name 列表
+            
+            for i, link_name in enumerate(link_names):
+                actor_name = self.actor_name_prefix + link_name
+                
+                # 获取 link i 相对于 root 的位姿
+                T_root_link = jaxlie.SE3(link_poses_rel_root_wxyz[i])
+                
+                # 计算 link 在世界坐标系下的最终位姿
+                T_world_link = T_world_base @ T_root_link
+                
+                # 转换为 4x4 矩阵以进行可视化
+                link_poses_dict[actor_name] = np.array(T_world_link.matrix())
+                
+            return link_poses_dict
+            
+        except Exception as e:
+            print(f"OptimizationThread: FK 计算失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return {}
+
 
 # --- 用于独立测试 ---
+# (独立测试代码保持不变，但会因缺少 set_hand_model 而失败)
+# (你需要更新它以使用 set_pyroki_robot)
 if __name__ == '__main__':
     from PyQt6.QtWidgets import QApplication, QPushButton, QWidget, QVBoxLayout
     
     app = QApplication([])
     
     print("测试 OptimizationThread...")
-    
-    # 1. 创建线程
     thread = OptimizationThread()
     
-    # 2. 模拟设置模型
-    test_links = {"base": None, "link1": None, "link2": None}
-    test_joints = [
-        {'name': 'j1', 'min': -1, 'max': 1, 'default': 0},
-        {'name': 'j2', 'min': -1, 'max': 1, 'default': 0}
-    ]
-    thread.set_hand_model(test_links, test_joints)
+    # [修改] 测试代码需要更新
+    print("注意: 独立测试代码需要更新以使用 'set_pyroki_robot'")
+    print("      你必须提供一个真实的 pk.Robot 对象来进行测试。")
+    print("      跳过 set_hand_model 测试。")
+    
+    # 2. 模拟设置模型 (已过时)
+    # test_links = {"base": None, "link1": None, "link2": None}
+    # test_joints = [
+    #     {'name': 'j1', 'min': -1, 'max': 1, 'default': 0},
+    #     {'name': 'j2', 'min': -1, 'max': 1, 'default': 0}
+    # ]
+    # thread.set_hand_model(test_links, test_joints) 
     
     # 3. 连接信号
     def on_pose_update(poses: dict):
-        print(f"--- [UI 线程] 收到位姿更新 ---")
-        for name, pose in poses.items():
-            print(f"  {name}: T=({pose[0:3, 3][0]:.3f}, {pose[0:3, 3][1]:.3f}, {pose[0:3, 3][2]:.3f})")
+        print(f"--- [UI 线程] 收到位姿更新 (共 {len(poses)} 个 links) ---")
+        if poses:
+            name, pose = list(poses.items())[0]
+            print(f"  (示例) {name}: T=({pose[0:3, 3][0]:.3f}, ...)")
             
     thread.pose_update_signal.connect(on_pose_update)
-    
-    # 4. 启动线程
     thread.start()
     
     # 5. 模拟 UI 交互
     def test_optimization():
-        print("\n--- [UI 线程] 触发优化 ---")
-        anchors = [
-            {'hand_point': [0.1, 0.0, 0.0], 'obj_point': [1.0, 0.5, 0.2]}
-        ]
+        print("\n--- [UI 线程] 触发优化 (将失败，因为 robot=None) ---")
+        anchors = [{'hand_point': [0.1, 0.0, 0.0], 'obj_point': [1.0, 0.5, 0.2]}]
         thread.trigger_optimization(anchors)
         
     def test_manual_joint():
-        print("\n--- [UI 线程] 触发手动关节 ---")
+        print("\n--- [UI 线程] 触发手动关节 (将失败，因为 robot=None) ---")
         thread.set_manual_joint('j1', 0.5)
 
     def stop_thread():
@@ -415,11 +478,10 @@ if __name__ == '__main__':
         thread.wait(1000)
         app.quit()
 
-    # 6. 创建一个简单的
     window = QWidget()
     layout = QVBoxLayout(window)
-    btn_opt = QPushButton("1. 触发优化")
-    btn_man = QPushButton("2. 设置关节 'j1' = 0.5")
+    btn_opt = QPushButton("1. 触发优化 (将失败)")
+    btn_man = QPushButton("2. 设置关节 'j1' = 0.5 (将失败)")
     btn_stop = QPushButton("3. 停止线程并退出")
     
     btn_opt.clicked.connect(test_optimization)
@@ -431,5 +493,4 @@ if __name__ == '__main__':
     layout.addWidget(btn_stop)
     
     window.show()
-    
     app.exec()
