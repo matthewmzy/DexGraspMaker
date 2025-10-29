@@ -55,6 +55,10 @@ class DataManager(QObject):
     # {link_name: np.ndarray(4,4)}
     hand_initial_pose_signal = pyqtSignal(dict)
 
+    # 信号 8: 锚点调整相关
+    adjust_hand_anchor_signal = pyqtSignal(int)  # 开始调整手上锚点 (anchor_index)
+    adjust_object_anchor_signal = pyqtSignal(int)  # 开始调整物体锚点 (anchor_index)
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         
@@ -77,8 +81,19 @@ class DataManager(QObject):
         self._temp_hand_anchor: dict | None = None # 存储临时的手部点信息
         self._temp_object_anchor: dict | None = None # 存储临时的物体点信息
 
+        # 5. 当前link姿态 (用于锚点调整)
+        self.current_link_poses: dict[str, np.ndarray] = {}  # {link_name: 4x4 transform matrix}
+
     # --- 公共槽 (Public Slots) ---
     # 这些槽由 main_window 连接到 controls_widget 的信号
+
+    def update_current_link_poses(self, link_poses: dict[str, np.ndarray]) -> None:
+        """
+        更新当前link姿态（由main_window调用）
+        
+        :param link_poses: {link_name: 4x4 transform matrix}
+        """
+        self.current_link_poses = link_poses
 
     def load_object_from_file(self, file_path: str) -> bool:
         """
@@ -463,16 +478,70 @@ class DataManager(QObject):
             self.anchor_list_updated_signal.emit(self.anchor_pairs)
             
             self.status_message_signal.emit(f"✓ 锚点对 #{row_index+1} 已{status}，优化已更新。")
-            self.anchor_list_updated_signal.emit(self.anchor_pairs)
-            self.status_message_signal.emit(f"已删除锚点 {row_index}")
-        else:
-            print(f"DataManager: 警告: 尝试删除无效的锚点索引 {row_index}")
+
+    @pyqtSlot(int)
+    def on_adjust_hand_anchor(self, anchor_index: int) -> None:
+        """
+        开始调整手上锚点位置
+        
+        :param anchor_index: 锚点对索引
+        """
+        if 0 <= anchor_index < len(self.anchor_pairs):
+            # 发射信号给main_window，让其启动键盘控制器
+            self.adjust_hand_anchor_signal.emit(anchor_index)
+
+    @pyqtSlot(int)
+    def on_adjust_object_anchor(self, anchor_index: int) -> None:
+        """
+        开始调整物体锚点位置
+        
+        :param anchor_index: 锚点对索引
+        """
+        if 0 <= anchor_index < len(self.anchor_pairs):
+            # 发射信号给main_window，让其启动键盘控制器
+            self.adjust_object_anchor_signal.emit(anchor_index)
+
+    @pyqtSlot(int, str, list)
+    def on_update_anchor_position(self, anchor_index: int, point_type: str, position: list) -> None:
+        """
+        更新锚点位置
+        
+        :param anchor_index: 锚点对索引
+        :param point_type: 点类型 ("hand" 或 "object")
+        :param position: 新位置 [x, y, z] (对于hand是局部坐标，对于object是世界坐标)
+        """
+        if 0 <= anchor_index < len(self.anchor_pairs):
+            if point_type == "hand":
+                # 手部锚点：直接更新局部坐标，世界坐标会在下一帧pose更新时自动计算
+                self.anchor_pairs[anchor_index]['hand_point_local'] = position
+                
+                # 立即计算并更新世界坐标（用于一致性）
+                link_name = self.anchor_pairs[anchor_index]['hand_link_name']
+                if link_name in self.current_link_poses:
+                    T_world_link = self.current_link_poses[link_name]
+                    local_pos_homogeneous = np.append(position, 1.0)
+                    world_pos = (T_world_link @ local_pos_homogeneous)[:3]
+                    self.anchor_pairs[anchor_index]['hand_point'] = world_pos.tolist()
+                    
+            elif point_type == "object":
+                # 物体锚点：直接使用世界坐标
+                self.anchor_pairs[anchor_index]['obj_point'] = position
+                self.anchor_pairs[anchor_index]['obj_point_local'] = position
+            
+            print(f"DataManager: 已更新锚点对 #{anchor_index+1} 的 {point_type} 点位置: {position}")
+            
+            # 立即触发优化更新（只发给优化线程，不重建UI列表）
+            self.new_anchor_pair_signal.emit(self.anchor_pairs)
+            # 注意：不发射 anchor_list_updated_signal 以避免重建UI列表和重置按钮状态
+            
+            self.status_message_signal.emit(f"✓ 锚点对 #{anchor_index+1} 的 {point_type} 点已更新，优化已重新开始。")
 
 # --- 用于独立测试 ---
 if __name__ == '__main__':
     # DataManager 依赖 QApplication 来运行 QFileDialog
     # 我们可以进行有限的单元测试
     
+    from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
     
     dm = DataManager()

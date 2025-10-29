@@ -11,6 +11,7 @@ from vista_widget import VistaWidget
 from controls_widget import ControlsWidget  # 使用新版 UI
 from data_manager import DataManager
 from optimization_thread import OptimizationThread
+from keyboard_controller import KeyboardController
 
 
 class MainWindow(QMainWindow):
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         print("初始化核心组件...")
         self.data_manager = DataManager(self)
         self.optimization_thread = OptimizationThread(self)
+        self.keyboard_controller = KeyboardController(self)
 
     def init_ui(self) -> None:
         """
@@ -166,6 +168,27 @@ class MainWindow(QMainWindow):
         # 控件 (启用/禁用复选框) -> 数据管理器 (切换锚点状态)
         self.controls_widget.toggle_anchor_signal.connect(self.data_manager.on_toggle_anchor)
 
+        # --- 锚点位置调整 ---
+        # 控件 (调整按钮) -> 数据管理器 (开始调整)
+        self.controls_widget.adjust_hand_anchor_signal.connect(self.data_manager.on_adjust_hand_anchor)
+        self.controls_widget.adjust_object_anchor_signal.connect(self.data_manager.on_adjust_object_anchor)
+        
+        # 数据管理器 (开始调整) -> 主窗口 (启动键盘控制器)
+        self.data_manager.adjust_hand_anchor_signal.connect(self.on_start_adjust_hand_anchor)
+        self.data_manager.adjust_object_anchor_signal.connect(self.on_start_adjust_object_anchor)
+        
+        # 控件 (位置更新) -> 数据管理器 (更新位置)
+        self.controls_widget.update_anchor_position_signal.connect(self.data_manager.on_update_anchor_position)
+        
+        # 键盘控制器 (位置改变) -> 控件 (更新显示)
+        self.keyboard_controller.position_changed_signal.connect(self.controls_widget.update_anchor_position)
+        
+        # 键盘控制器 (控制结束) -> 主窗口 (清理状态)
+        self.keyboard_controller.control_ended_signal.connect(self.on_keyboard_control_ended)
+        
+        # 键盘控制器 (状态变化) -> 控件 (更新按钮状态)
+        self.keyboard_controller.control_state_changed_signal.connect(self.controls_widget.update_anchor_adjust_button_state)
+
         # --- 流程 3: 触发优化 ---
         # 数据管理器 (凑成一对) -> 优化线程 (开始计算)
         self.data_manager.new_anchor_pair_signal.connect(self.optimization_thread.trigger_optimization)
@@ -246,6 +269,9 @@ class MainWindow(QMainWindow):
             return
             
         print("MainWindow: 收到初始姿态，正在更新视窗...")
+        
+        # 存储初始姿态（用于静态视图的锚点位置计算）
+        self._initial_link_poses = poses_dict.copy()
         
         # 1. 更新右侧 (静态) 视窗 - 添加 'static_hand_' 前缀
         static_poses = {}
@@ -330,20 +356,27 @@ class MainWindow(QMainWindow):
         # 注意：optimization_thread 的 _run_forward_kinematics 已经添加了前缀！
         self.view_center.update_hand_pose(link_poses_dict)
         
-        # 2. 快速更新锚点位置（每帧，但仅更新位置不重建actors）
+        # 2. 更新DataManager中的当前link姿态（用于锚点调整）
+        # 移除 'dyn_hand_' 前缀以匹配link名称
+        current_link_poses = {}
+        for actor_name, pose_matrix in link_poses_dict.items():
+            if actor_name.startswith('dyn_hand_'):
+                link_name = actor_name[len('dyn_hand_'):]
+                current_link_poses[link_name] = pose_matrix
+        self.data_manager.update_current_link_poses(current_link_poses)
+        
+        # 3. 快速更新锚点位置（每帧，但仅更新位置不重建actors）
         anchor_pairs = self.data_manager.anchor_pairs
         if not anchor_pairs:
             return
         
-        # 更新每个锚点对的手部点世界坐标
-        # 注意：我们需要从带前缀的 key 中提取纯 link_name
-        updated_pairs = []
+        # 为动态视图（view_center）计算锚点位置 - 使用当前动态姿态
+        dynamic_updated_pairs = []
         for pair in anchor_pairs:
             link_name = pair['hand_link_name']
             hand_local = np.array(pair['hand_point_local'])
             
             # 查找对应 link 的当前世界位姿
-            # link_poses_dict 的 key 是 'dyn_hand_' + link_name
             actor_name = "dyn_hand_" + link_name
             if actor_name in link_poses_dict:
                 T_world_link = link_poses_dict[actor_name]
@@ -355,19 +388,54 @@ class MainWindow(QMainWindow):
                 # 创建更新后的锚点对
                 updated_pair = pair.copy()
                 updated_pair['hand_point'] = hand_world.tolist()
-                updated_pairs.append(updated_pair)
+                dynamic_updated_pairs.append(updated_pair)
             else:
                 # 如果找不到对应的 link，保持原值
-                updated_pairs.append(pair)
+                dynamic_updated_pairs.append(pair)
+        
+        # 为静态视图（view_left, view_right）计算锚点位置 - 使用初始姿态
+        static_updated_pairs = []
+        if hasattr(self, '_initial_link_poses') and self._initial_link_poses:
+            for pair in anchor_pairs:
+                link_name = pair['hand_link_name']
+                hand_local = np.array(pair['hand_point_local'])
+                
+                # 创建更新后的锚点对
+                updated_pair = pair.copy()
+                
+                # 处理手部锚点：使用初始link姿态计算位置
+                if link_name in self._initial_link_poses:
+                    T_world_link = self._initial_link_poses[link_name]
+                    
+                    # 将局部坐标转换为世界坐标
+                    hand_local_homogeneous = np.append(hand_local, 1.0)
+                    hand_world = (T_world_link @ hand_local_homogeneous)[:3]
+                    
+                    updated_pair['hand_point'] = hand_world.tolist()
+                else:
+                    # 如果找不到对应的 link，保持原值
+                    pass
+                
+                # 物体锚点直接使用世界坐标（物体在世界坐标系中）
+                # obj_point已经是世界坐标，无需转换
+                
+                static_updated_pairs.append(updated_pair)
+        else:
+            # 如果没有初始姿态，使用动态姿态作为fallback
+            static_updated_pairs = dynamic_updated_pairs.copy()
         
         # 使用快速位置更新（不重建actors，性能更好）
         color_func = lambda i: self.get_color_for_pair(i)
         self.view_left.color_func = color_func
         self.view_right.color_func = color_func
         self.view_center.color_func = color_func
-        self.view_left.update_anchor_positions_fast(updated_pairs)
-        # self.view_right.update_anchor_positions_fast(updated_pairs)
-        self.view_center.update_anchor_positions_fast(updated_pairs)
+        
+        # 静态视图使用初始姿态计算的锚点位置
+        self.view_left.update_anchor_positions_fast(static_updated_pairs)
+        self.view_right.update_anchor_positions_fast(static_updated_pairs)
+        
+        # 动态视图使用当前姿态计算的锚点位置
+        self.view_center.update_anchor_positions_fast(dynamic_updated_pairs)
 
     def load_default_assets(self) -> None:
         """
@@ -405,6 +473,43 @@ class MainWindow(QMainWindow):
         
         # 延迟500ms后加载，确保窗口已显示
         QTimer.singleShot(500, delayed_load)
+
+    def on_start_adjust_hand_anchor(self, anchor_index: int) -> None:
+        """
+        开始或结束调整手上锚点
+        
+        :param anchor_index: 锚点对索引
+        """
+        if 0 <= anchor_index < len(self.data_manager.anchor_pairs):
+            anchor = self.data_manager.anchor_pairs[anchor_index]
+            # 使用局部坐标进行键盘控制，因为用户想要相对于手移动
+            position = np.array(anchor['hand_point_local'])
+            
+            if self.keyboard_controller.toggle_control(anchor_index, "hand", position):
+                self.statusBar().showMessage(f"开始调整锚点对 #{anchor_index+1} 的手上位置 (WASD+空格控制)")
+            else:
+                self.statusBar().showMessage(f"结束调整锚点对 #{anchor_index+1} 的手上位置")
+
+    def on_start_adjust_object_anchor(self, anchor_index: int) -> None:
+        """
+        开始或结束调整物体锚点
+        
+        :param anchor_index: 锚点对索引
+        """
+        if 0 <= anchor_index < len(self.data_manager.anchor_pairs):
+            anchor = self.data_manager.anchor_pairs[anchor_index]
+            position = np.array(anchor['obj_point'])
+            
+            if self.keyboard_controller.toggle_control(anchor_index, "object", position):
+                self.statusBar().showMessage(f"开始调整锚点对 #{anchor_index+1} 的物体位置 (WASD+空格控制)")
+            else:
+                self.statusBar().showMessage(f"结束调整锚点对 #{anchor_index+1} 的物体位置")
+
+    def on_keyboard_control_ended(self) -> None:
+        """
+        键盘控制结束时的处理
+        """
+        self.statusBar().showMessage("键盘控制结束")
 
     def closeEvent(self, event) -> None:
         """

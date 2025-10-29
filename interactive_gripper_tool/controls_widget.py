@@ -6,7 +6,8 @@ import numpy as np
 from PyQt6.QtWidgets import (
     QWidget, QTabWidget, QPushButton, QSlider, QListWidget, QListWidgetItem,
     QVBoxLayout, QHBoxLayout, QGroupBox, QDoubleSpinBox, QLabel,
-    QGridLayout, QScrollArea, QFrame, QApplication, QColorDialog, QCheckBox
+    QGridLayout, QScrollArea, QFrame, QApplication, QColorDialog, QCheckBox,
+    QStyledItemDelegate, QHBoxLayout
 )
 from PyQt6.QtCore import pyqtSignal, Qt, pyqtSlot
 from PyQt6.QtGui import QColor, QBrush
@@ -34,6 +35,14 @@ class ControlsWidget(QWidget):
     delete_anchor_signal = pyqtSignal(int)  # 删除指定索引的锚点对
     toggle_anchor_signal = pyqtSignal(int, bool)  # 启用/禁用锚点对
     
+    # 锚点位置调整
+    adjust_hand_anchor_signal = pyqtSignal(int)  # 开始调整手上锚点 (anchor_index)
+    adjust_object_anchor_signal = pyqtSignal(int)  # 开始调整物体锚点 (anchor_index)
+    update_anchor_position_signal = pyqtSignal(int, str, list)  # 更新锚点位置 (anchor_index, point_type, position)
+    
+    # 键盘控制状态
+    keyboard_control_state_changed_signal = pyqtSignal(int, str, bool)  # anchor_index, point_type, is_active
+    
     # 流程 3: 可视化
     visualization_settings_changed_signal = pyqtSignal(dict)
     
@@ -59,6 +68,9 @@ class ControlsWidget(QWidget):
         
         # 存储动态创建的关节控件
         self.joint_controls = {}
+        
+        # 存储锚点调整按钮的引用，用于状态更新
+        self.anchor_adjust_buttons = {}  # {(anchor_index, point_type): button}
         
         # 主布局
         main_layout = QVBoxLayout(self)
@@ -210,6 +222,10 @@ class ControlsWidget(QWidget):
         
         main_layout.addWidget(right_widget)
         
+        # 设置左右两部分的宽度比例为 3:2
+        main_layout.setStretchFactor(left_widget, 3)
+        main_layout.setStretchFactor(right_widget, 2)
+        
         # 连接信号
         self.add_anchor_button.clicked.connect(self.add_anchor_pair_signal.emit)
         self.confirm_anchor_button.clicked.connect(self.confirm_anchor_pair_signal.emit)
@@ -342,7 +358,12 @@ class ControlsWidget(QWidget):
             # 获取颜色
             color = self.anchor_colors[i % len(self.anchor_colors)]
             
-            # 创建列表项
+            # 创建列表项容器
+            item_widget = QWidget()
+            item_layout = QHBoxLayout(item_widget)
+            item_layout.setContentsMargins(5, 5, 5, 5)
+            
+            # 左侧：文本信息
             link_name = pair.get('hand_link_name', '未知')
             enabled = pair.get('enabled', True)
             
@@ -350,17 +371,106 @@ class ControlsWidget(QWidget):
             if not enabled:
                 item_text += " (已禁用)"
             
-            item = QListWidgetItem(item_text)
-            
-            # 设置颜色
-            item.setBackground(QBrush(color.lighter(180)))
-            item.setForeground(QBrush(QColor(0, 0, 0)))
-            
-            # 如果禁用，设置灰色
+            text_label = QLabel(item_text)
+            text_label.setStyleSheet(f"font-weight: bold; color: {color.name()};")
             if not enabled:
-                item.setForeground(QBrush(QColor(128, 128, 128)))
+                text_label.setStyleSheet("color: #808080; font-style: italic;")
+            
+            item_layout.addWidget(text_label)
+            
+            # 添加伸缩空间
+            item_layout.addStretch()
+            
+            # 右侧：调整按钮
+            adjust_hand_btn = QPushButton("🤖 调手上")
+            adjust_hand_btn.setFixedSize(80, 30)
+            adjust_hand_btn.setStyleSheet(
+                "QPushButton { background-color: #2196F3; color: white; border-radius: 3px; }"
+                "QPushButton:hover { background-color: #1976D2; }"
+                "QPushButton:pressed { background-color: #1565C0; }"
+            )
+            adjust_hand_btn.clicked.connect(lambda checked, idx=i: self.adjust_hand_anchor_signal.emit(idx))
+            
+            adjust_obj_btn = QPushButton("📦 调物体")
+            adjust_obj_btn.setFixedSize(80, 30)
+            adjust_obj_btn.setStyleSheet(
+                "QPushButton { background-color: #4CAF50; color: white; border-radius: 3px; }"
+                "QPushButton:hover { background-color: #45a049; }"
+                "QPushButton:pressed { background-color: #3d8b40; }"
+            )
+            adjust_obj_btn.clicked.connect(lambda checked, idx=i: self.adjust_object_anchor_signal.emit(idx))
+            
+            # 保存按钮引用
+            self.anchor_adjust_buttons[(i, "hand")] = adjust_hand_btn
+            self.anchor_adjust_buttons[(i, "object")] = adjust_obj_btn
+            
+            item_layout.addWidget(adjust_hand_btn)
+            item_layout.addWidget(adjust_obj_btn)
+            
+            # 创建列表项
+            item = QListWidgetItem()
+            item.setSizeHint(item_widget.sizeHint())
+            
+            # 设置背景色
+            item.setBackground(QBrush(color.lighter(190)))
             
             self.anchor_list_widget.addItem(item)
+            self.anchor_list_widget.setItemWidget(item, item_widget)
+
+    def update_anchor_adjust_button_state(self, anchor_index: int, point_type: str, is_active: bool) -> None:
+        """
+        更新锚点调整按钮的状态
+        
+        :param anchor_index: 锚点对索引
+        :param point_type: 点类型 ("hand" 或 "object")
+        :param is_active: 是否正在调整
+        """
+        button_key = (anchor_index, point_type)
+        if button_key in self.anchor_adjust_buttons:
+            button = self.anchor_adjust_buttons[button_key]
+            
+            if is_active:
+                # 激活状态：改变颜色和文本
+                if point_type == "hand":
+                    button.setText("🔵 调整中")
+                    button.setStyleSheet(
+                        "QPushButton { background-color: #FF9800; color: white; border-radius: 3px; font-weight: bold; }"
+                        "QPushButton:hover { background-color: #F57C00; }"
+                        "QPushButton:pressed { background-color: #EF6C00; }"
+                    )
+                else:  # object
+                    button.setText("🔵 调整中")
+                    button.setStyleSheet(
+                        "QPushButton { background-color: #FF9800; color: white; border-radius: 3px; font-weight: bold; }"
+                        "QPushButton:hover { background-color: #F57C00; }"
+                        "QPushButton:pressed { background-color: #EF6C00; }"
+                    )
+            else:
+                # 非激活状态：恢复原始样式
+                if point_type == "hand":
+                    button.setText("🤖 调手上")
+                    button.setStyleSheet(
+                        "QPushButton { background-color: #2196F3; color: white; border-radius: 3px; }"
+                        "QPushButton:hover { background-color: #1976D2; }"
+                        "QPushButton:pressed { background-color: #1565C0; }"
+                    )
+                else:  # object
+                    button.setText("📦 调物体")
+                    button.setStyleSheet(
+                        "QPushButton { background-color: #4CAF50; color: white; border-radius: 3px; }"
+                        "QPushButton:hover { background-color: #45a049; }"
+                        "QPushButton:pressed { background-color: #3d8b40; }"
+                    )
+
+    def update_anchor_position(self, anchor_index: int, point_type: str, position: list) -> None:
+        """
+        更新锚点位置（由键盘控制器调用）
+        
+        :param anchor_index: 锚点对索引
+        :param point_type: 点类型 ("hand" 或 "object")
+        :param position: 新位置 [x, y, z]
+        """
+        self.update_anchor_position_signal.emit(anchor_index, point_type, position)
 
     @pyqtSlot(list)
     def populate_joint_controls(self, joint_info_list: list) -> None:

@@ -278,7 +278,7 @@ class VistaWidget(QWidget):
 
     def update_anchor_positions_fast(self, updated_pairs: list) -> None:
         """
-        快速更新锚点位置（仅更新手部点位置，不重建actors）。
+        快速更新锚点位置（同时更新手部点和物体点位置，不重建actors）。
         
         :param updated_pairs: 更新后的锚点对列表
         """
@@ -291,16 +291,25 @@ class VistaWidget(QWidget):
             
             actors = self.anchor_actors[i]
             hand_point = pair['hand_point']
+            obj_point = pair['obj_point']
             color = self.color_func(i)
             
-            # 更新位置
+            # 更新手部锚点位置
             hand_translation = np.eye(4)
             hand_translation[:3, 3] = hand_point
             actors['hand_actor'].user_matrix = hand_translation
             
+            # 更新物体锚点位置
+            if 'obj_actor' in actors:
+                obj_translation = np.eye(4)
+                obj_translation[:3, 3] = obj_point
+                actors['obj_actor'].user_matrix = obj_translation
+            
             # 更新颜色如果改变
             if actors['color'] != color:
                 actors['hand_actor'].prop.color = color
+                if 'obj_actor' in actors:
+                    actors['obj_actor'].prop.color = color
                 actors['color'] = color
             
             actors['pair'] = pair
