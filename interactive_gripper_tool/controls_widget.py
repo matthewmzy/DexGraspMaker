@@ -127,7 +127,11 @@ class ControlsWidget(QWidget):
     def _create_anchors_tab(self) -> QWidget:
         """创建改进的 "锚点配对" 选项卡"""
         tab_widget = QWidget()
-        layout = QVBoxLayout(tab_widget)
+        main_layout = QHBoxLayout(tab_widget)  # 改为水平布局
+        
+        # 左侧：操作区域
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
         
         # 顶部：添加锚点对按钮（醒目）
         add_button_layout = QHBoxLayout()
@@ -163,7 +167,7 @@ class ControlsWidget(QWidget):
         self.confirm_anchor_button.setVisible(False)
         add_button_layout.addWidget(self.confirm_anchor_button)
         
-        layout.addLayout(add_button_layout)
+        left_layout.addLayout(add_button_layout)
         
         # 说明
         instruction_label = QLabel(
@@ -175,14 +179,22 @@ class ControlsWidget(QWidget):
         )
         instruction_label.setStyleSheet("QLabel { background-color: #fffacd; padding: 8px; border-radius: 5px; }")
         instruction_label.setWordWrap(True)
-        layout.addWidget(instruction_label)
+        left_layout.addWidget(instruction_label)
         
-        # 中间：锚点对列表
+        # 添加伸缩空间
+        left_layout.addStretch()
+        
+        main_layout.addWidget(left_widget)
+        
+        # 右侧：锚点对列表
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        
         list_group = QGroupBox("锚点对列表")
         list_layout = QVBoxLayout(list_group)
         
         self.anchor_list_widget = QListWidget()
-        self.anchor_list_widget.setMinimumHeight(200)
+        self.anchor_list_widget.setMinimumHeight(300)
         list_layout.addWidget(self.anchor_list_widget)
         
         # 列表操作按钮
@@ -194,7 +206,9 @@ class ControlsWidget(QWidget):
         button_layout.addWidget(self.clear_all_button)
         list_layout.addLayout(button_layout)
         
-        layout.addWidget(list_group)
+        right_layout.addWidget(list_group)
+        
+        main_layout.addWidget(right_widget)
         
         # 连接信号
         self.add_anchor_button.clicked.connect(self.add_anchor_pair_signal.emit)

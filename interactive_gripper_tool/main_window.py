@@ -204,6 +204,17 @@ class MainWindow(QMainWindow):
         self.view_left.enable_picking(is_active)  # 启用物体拾取
         self.view_right.enable_picking(is_active) # 启用机械手拾取
         self.view_center.enable_picking(False)    # 中心视窗始终禁用拾取
+        
+        if is_active:
+            # 设置下一个锚点对的颜色
+            next_index = len(self.data_manager.anchor_pairs)
+            color = self.controls_widget.get_anchor_color(next_index)
+            self.view_left.set_next_anchor_color(color)
+            self.view_right.set_next_anchor_color(color)
+        else:
+            # 清除临时拾取标记
+            self.view_left.plotter.remove_actor(f"_pick_marker_{self.view_left.objectName()}")
+            self.view_right.plotter.remove_actor(f"_pick_marker_{self.view_right.objectName()}")
 
     def on_visualization_changed(self, settings: dict) -> None:
         """

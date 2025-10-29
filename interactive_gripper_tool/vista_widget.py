@@ -48,8 +48,9 @@ class VistaWidget(QWidget):
         self.color_func = None
         self.sphere_radius = 0.005
         
-        # 5. 内部状态
+        # 5. 拾取相关
         self._picking_enabled = False
+        self._next_anchor_color = (1.0, 0.0, 0.0)  # 默认红色
         
         # 5. 配置渲染器
         self.plotter.set_background("gray", top="white") # 渐变背景
@@ -179,6 +180,14 @@ class VistaWidget(QWidget):
             self.plotter.add_text("拾取模式已激活", name="_pick_text", position='upper_left')
         else:
             self.plotter.remove_actor("_pick_text")
+
+    def set_next_anchor_color(self, color: tuple) -> None:
+        """
+        设置下一个锚点对的颜色 (RGB, 0-1范围)
+        
+        :param color: (r, g, b) 元组
+        """
+        self._next_anchor_color = color
 
     def set_actor_properties(self, name: str | None = None, 
                            name_pattern: str | None = None, **kwargs) -> None:
@@ -334,11 +343,11 @@ class VistaWidget(QWidget):
         relative_point = pose_inv @ np.append(picked_point, 1.0)
         relative_point = relative_point[:3]
 
-        # 5. 添加一个视觉标记 (一个小红球)
+        # 5. 添加一个视觉标记 (使用下一个锚点对的颜色)
         #    使用一个固定的名字，这样下次点击时会自动替换
         self.plotter.add_mesh(
             pyvista.Sphere(radius=0.005, center=picked_point),
-            color='red',
+            color=self._next_anchor_color,
             name=f"_pick_marker_{self.objectName()}"
         )
 
