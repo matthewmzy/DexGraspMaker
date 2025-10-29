@@ -48,6 +48,13 @@ class ControlsWidget(QWidget):
     
     # 流程 4: 关节调试
     manual_joint_changed_signal = pyqtSignal(str, float)
+    
+    # 优化控制
+    optimization_toggle_signal = pyqtSignal(bool)  # True=开始, False=暂停
+    
+    # 姿态导入/导出
+    import_pose_signal = pyqtSignal()
+    export_pose_signal = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -297,7 +304,87 @@ class ControlsWidget(QWidget):
     def _create_joints_tab(self) -> QWidget:
         """创建 "关节调试" 选项卡"""
         tab_widget = QWidget()
-        main_layout = QVBoxLayout(tab_widget)
+        main_layout = QHBoxLayout(tab_widget)  # 改为水平布局
+        
+        # 左侧控制面板 (40%)
+        left_panel = self._create_joints_left_panel()
+        left_panel.setFixedWidth(300)  # 固定宽度约40%
+        
+        # 右侧关节滑块面板 (60%)
+        right_panel = self._create_joints_right_panel()
+        
+        main_layout.addWidget(left_panel, 2)  # 比例 2
+        main_layout.addWidget(right_panel, 3)  # 比例 3
+        
+        return tab_widget
+
+    def _create_joints_left_panel(self) -> QWidget:
+        """创建关节调试左侧控制面板"""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        
+        # 优化控制组
+        opt_group = QGroupBox("优化控制")
+        opt_layout = QVBoxLayout(opt_group)
+        
+        # 优化开启/暂停按钮
+        self.optimization_toggle_button = QPushButton("▶️ 开始优化")
+        self.optimization_toggle_button.setCheckable(True)
+        self.optimization_toggle_button.setChecked(True)  # 默认开启
+        self.optimization_toggle_button.clicked.connect(self._on_optimization_toggle)
+        opt_layout.addWidget(self.optimization_toggle_button)
+        
+        layout.addWidget(opt_group)
+        
+        # 手姿态显示组
+        pose_group = QGroupBox("手姿态")
+        pose_layout = QVBoxLayout(pose_group)
+        
+        # 平移矩阵
+        translation_label = QLabel("平移 (X, Y, Z):")
+        pose_layout.addWidget(translation_label)
+        
+        self.translation_display = QLabel("0.000, 0.000, 0.000")
+        self.translation_display.setStyleSheet("font-family: monospace; background-color: #f0f0f0; padding: 5px;")
+        pose_layout.addWidget(self.translation_display)
+        
+        # 旋转矩阵
+        rotation_label = QLabel("旋转矩阵:")
+        pose_layout.addWidget(rotation_label)
+        
+        self.rotation_display = QLabel(
+            "1.000  0.000  0.000\n"
+            "0.000  1.000  0.000\n"
+            "0.000  0.000  1.000"
+        )
+        self.rotation_display.setStyleSheet("font-family: monospace; background-color: #f0f0f0; padding: 5px;")
+        pose_layout.addWidget(self.rotation_display)
+        
+        layout.addWidget(pose_group)
+        
+        # 姿态导入/导出组
+        io_group = QGroupBox("姿态管理")
+        io_layout = QVBoxLayout(io_group)
+        
+        self.import_pose_button = QPushButton("📥 导入姿态")
+        self.import_pose_button.clicked.connect(self._on_import_pose)
+        io_layout.addWidget(self.import_pose_button)
+        
+        self.export_pose_button = QPushButton("📤 导出姿态")
+        self.export_pose_button.clicked.connect(self._on_export_pose)
+        io_layout.addWidget(self.export_pose_button)
+        
+        layout.addWidget(io_group)
+        
+        # 添加伸缩空间
+        layout.addStretch()
+        
+        return panel
+
+    def _create_joints_right_panel(self) -> QWidget:
+        """创建关节调试右侧滑块面板"""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
         
         self.joints_placeholder_label = QLabel(
             "加载机械手后，这里会显示所有关节的控制器"
@@ -314,9 +401,9 @@ class ControlsWidget(QWidget):
         self.joints_layout.addWidget(self.joints_placeholder_label)
         
         scroll_area.setWidget(self.scroll_content_widget)
-        main_layout.addWidget(scroll_area)
+        layout.addWidget(scroll_area)
         
-        return tab_widget
+        return panel
 
     # --- 槽函数 ---
 
@@ -562,6 +649,53 @@ class ControlsWidget(QWidget):
     
     # 向后兼容：create_joint_controls 是 populate_joint_controls 的别名
     create_joint_controls = populate_joint_controls
+
+    # --- 关节调试相关的槽函数 ---
+
+    def _on_optimization_toggle(self) -> None:
+        """优化开启/暂停按钮点击"""
+        is_checked = self.optimization_toggle_button.isChecked()
+        if is_checked:
+            self.optimization_toggle_button.setText("⏸️ 暂停优化")
+        else:
+            self.optimization_toggle_button.setText("▶️ 开始优化")
+        self.optimization_toggle_signal.emit(is_checked)
+
+    def _on_import_pose(self) -> None:
+        """导入姿态按钮点击"""
+        self.import_pose_signal.emit()
+
+    def _on_export_pose(self) -> None:
+        """导出姿态按钮点击"""
+        self.export_pose_signal.emit()
+
+    # --- 公共方法 ---
+
+    def update_hand_pose_display(self, translation: list, rotation_matrix: list) -> None:
+        """
+        更新手姿态显示
+        
+        :param translation: 平移向量 [x, y, z]
+        :param rotation_matrix: 3x3旋转矩阵
+        """
+        # 更新平移显示
+        self.translation_display.setText(".3f")
+        
+        # 更新旋转矩阵显示
+        rot_text = ".3f"
+        self.rotation_display.setText(rot_text)
+
+    def set_optimization_state(self, is_running: bool) -> None:
+        """
+        设置优化状态显示
+        
+        :param is_running: 优化是否正在运行
+        """
+        self.optimization_toggle_button.setChecked(is_running)
+        if is_running:
+            self.optimization_toggle_button.setText("⏸️ 暂停优化")
+        else:
+            self.optimization_toggle_button.setText("▶️ 开始优化")
 
 
 # --- 测试代码 ---

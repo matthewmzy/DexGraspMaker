@@ -42,6 +42,7 @@ class OptimizationThread(QThread):
         self._is_running = True
         self._needs_optimization = False # 优化循环的开关
         self._manual_update = False      # 手动关节更新的开关
+        self._is_paused = False          # 优化暂停开关
 
         # --- 状态变量 (由 mutex 保护) ---
 
@@ -73,6 +74,22 @@ class OptimizationThread(QThread):
         with QMutexLocker(self.mutex):
             self._is_running = False
             self.wait_condition.wakeAll() # 唤醒 'run' 循环以便退出
+    
+    def pause(self) -> None:
+        """
+        暂停优化。
+        """
+        with QMutexLocker(self.mutex):
+            self._is_paused = True
+            self.wait_condition.wakeAll()
+    
+    def resume(self) -> None:
+        """
+        恢复优化。
+        """
+        with QMutexLocker(self.mutex):
+            self._is_paused = False
+            self.wait_condition.wakeAll()
     
     def _setup_optimization(self) -> None:
         """
@@ -139,7 +156,8 @@ class OptimizationThread(QThread):
                 # 如果没有工作 (优化=False, 手动=False) 并且在运行中，则等待
                 while (not self._needs_optimization 
                        and not self._manual_update 
-                       and self._is_running):
+                       and self._is_running
+                       and not self._is_paused):
                     
                     self.wait_condition.wait(self.mutex) # 自动释放锁并等待
                 
@@ -290,6 +308,7 @@ class OptimizationThread(QThread):
                 self.target_joint_values[joint_name] = value
                 self._manual_update = True # 标记为手动更新
                 self._needs_optimization = False # 手动操作会覆盖优化
+                self._is_paused = True # 手动调节时暂停优化
                 
                 self.wait_condition.wakeAll() # 唤醒 'run' 循环以应用FK
 

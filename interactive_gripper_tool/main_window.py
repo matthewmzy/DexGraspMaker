@@ -211,7 +211,14 @@ class MainWindow(QMainWindow):
         # (优化线程将通过 pose_update_signal 发出新位姿)
         self.controls_widget.manual_joint_changed_signal.connect(self.optimization_thread.set_manual_joint)
         
-        # --- 流程 7: 锚点可视化 ---
+        # --- 流程 7: 优化控制 ---
+        self.controls_widget.optimization_toggle_signal.connect(self.on_optimization_toggle)
+        
+        # --- 流程 8: 姿态导入/导出 ---
+        self.controls_widget.import_pose_signal.connect(self.data_manager.import_hand_pose)
+        self.controls_widget.export_pose_signal.connect(self.data_manager.export_hand_pose)
+        
+        # --- 流程 9: 锚点可视化 ---
         # 数据管理器 (锚点列表更新) -> 主窗口 (更新所有视窗的锚点显示)
         self.data_manager.anchor_list_updated_signal.connect(self.on_anchor_list_updated)
         
@@ -436,6 +443,9 @@ class MainWindow(QMainWindow):
         
         # 动态视图使用当前姿态计算的锚点位置
         self.view_center.update_anchor_positions_fast(dynamic_updated_pairs)
+        
+        # 更新手姿态显示
+        self.update_hand_pose_display()
 
     def load_default_assets(self) -> None:
         """
@@ -448,8 +458,8 @@ class MainWindow(QMainWindow):
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(current_dir)
         
-        object_path = os.path.join(project_root, "test_assets", "Aligned.obj")
-        hand_path = os.path.join(project_root, "test_assets", "shadow_hand_right.urdf")
+        object_path = os.path.join(project_root, "test_assets", "objects", "Mug.obj")
+        hand_path = os.path.join(project_root, "test_assets", "shadow", "shadow_hand_right.urdf")
         
         print(f"自动加载默认资源...")
         print(f"  物体: {object_path}")
@@ -523,6 +533,26 @@ class MainWindow(QMainWindow):
             
         print("再见。")
         event.accept()
+
+    def on_optimization_toggle(self, is_running: bool) -> None:
+        """
+        优化开启/暂停切换
+        
+        :param is_running: True=开始优化, False=暂停优化
+        """
+        if is_running:
+            self.optimization_thread.resume()
+            print("优化已恢复")
+        else:
+            self.optimization_thread.pause()
+            print("优化已暂停")
+
+    def update_hand_pose_display(self) -> None:
+        """
+        更新手姿态显示（位置和旋转矩阵）
+        """
+        translation, rotation_matrix = self.data_manager.get_current_hand_pose()
+        self.controls_widget.update_hand_pose_display(translation, rotation_matrix)
 
 
 # --- 用于独立测试 ---

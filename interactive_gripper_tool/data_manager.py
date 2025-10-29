@@ -58,6 +58,10 @@ class DataManager(QObject):
     # 信号 8: 锚点调整相关
     adjust_hand_anchor_signal = pyqtSignal(int)  # 开始调整手上锚点 (anchor_index)
     adjust_object_anchor_signal = pyqtSignal(int)  # 开始调整物体锚点 (anchor_index)
+    
+    # 信号 9: 手姿态导入/导出
+    import_hand_pose_signal = pyqtSignal()
+    export_hand_pose_signal = pyqtSignal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -535,6 +539,91 @@ class DataManager(QObject):
             # 注意：不发射 anchor_list_updated_signal 以避免重建UI列表和重置按钮状态
             
             self.status_message_signal.emit(f"✓ 锚点对 #{anchor_index+1} 的 {point_type} 点已更新，优化已重新开始。")
+
+    def import_hand_pose(self) -> None:
+        """
+        导入手姿态（关节角度）
+        """
+        from PyQt6.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(
+            None, "导入手姿态", "", "JSON files (*.json);;All files (*)"
+        )
+        
+        if file_path:
+            try:
+                import json
+                with open(file_path, 'r') as f:
+                    pose_data = json.load(f)
+                
+                # 验证数据格式
+                if not isinstance(pose_data, dict) or 'joint_values' not in pose_data:
+                    self.status_message_signal.emit("❌ 姿态文件格式错误：缺少 'joint_values' 字段")
+                    return
+                
+                joint_values = pose_data['joint_values']
+                if not isinstance(joint_values, dict):
+                    self.status_message_signal.emit("❌ 姿态文件格式错误：'joint_values' 应为字典")
+                    return
+                
+                # 更新关节值
+                for joint_name, value in joint_values.items():
+                    if joint_name in self.optimization_thread.target_joint_values:
+                        self.optimization_thread.set_manual_joint(joint_name, float(value))
+                
+                self.status_message_signal.emit(f"✓ 已导入手姿态：{len(joint_values)} 个关节")
+                
+            except Exception as e:
+                self.status_message_signal.emit(f"❌ 导入姿态失败：{str(e)}")
+
+    def export_hand_pose(self) -> None:
+        """
+        导出当前手姿态（关节角度）
+        """
+        from PyQt6.QtWidgets import QFileDialog
+        
+        # 获取当前关节值
+        from datetime import datetime
+        current_pose = {
+            'joint_values': self.optimization_thread.current_joint_values.copy(),
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            None, "导出手姿态", "hand_pose.json", "JSON files (*.json);;All files (*)"
+        )
+        
+        if file_path:
+            try:
+                import json
+                with open(file_path, 'w') as f:
+                    json.dump(current_pose, f, indent=2)
+                
+                self.status_message_signal.emit(f"✓ 已导出手姿态到：{file_path}")
+                
+            except Exception as e:
+                self.status_message_signal.emit(f"❌ 导出姿态失败：{str(e)}")
+
+    def get_current_hand_pose(self) -> tuple[list, list]:
+        """
+        获取当前手的位置和旋转矩阵
+        
+        :return: (translation, rotation_matrix) 元组
+        """
+        # 获取手掌的位姿（假设有一个名为 'palm' 或类似的基础link）
+        palm_link_name = None
+        for link_name in self.current_link_poses.keys():
+            if 'palm' in link_name.lower() or 'wrist' in link_name.lower():
+                palm_link_name = link_name
+                break
+        
+        if palm_link_name and palm_link_name in self.current_link_poses:
+            pose_matrix = self.current_link_poses[palm_link_name]
+            translation = pose_matrix[:3, 3].tolist()
+            rotation_matrix = pose_matrix[:3, :3].tolist()
+            return translation, rotation_matrix
+        
+        # 如果找不到手掌link，返回默认值
+        return [0.0, 0.0, 0.0], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
 
 # --- 用于独立测试 ---
 if __name__ == '__main__':
