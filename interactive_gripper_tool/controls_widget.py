@@ -1,17 +1,25 @@
-# controls_widget.py
+# controls_widget_v2.py
+# 重新设计的控件面板，支持更直观的多锚点工作流
 
 import sys
 import numpy as np
 from PyQt6.QtWidgets import (
-    QWidget, QTabWidget, QPushButton, QSlider, QListWidget, 
+    QWidget, QTabWidget, QPushButton, QSlider, QListWidget, QListWidgetItem,
     QVBoxLayout, QHBoxLayout, QGroupBox, QDoubleSpinBox, QLabel,
-    QGridLayout, QScrollArea, QFrame, QApplication
+    QGridLayout, QScrollArea, QFrame, QApplication, QColorDialog, QCheckBox
 )
 from PyQt6.QtCore import pyqtSignal, Qt, pyqtSlot
+from PyQt6.QtGui import QColor, QBrush
 
 class ControlsWidget(QWidget):
     """
-    封装所有 2D 控制按钮、滑块和列表的工具栏面板。
+    改进的控制面板 - 支持多锚点对的直观管理
+    
+    主要改进：
+    1. 简化的锚点添加流程 - 一键添加新锚点对
+    2. 每个锚点对有独立的颜色
+    3. 实时优化 - 任何修改都立即触发优化
+    4. 更好的视觉反馈
     """
     
     # --- 信号定义 ---
@@ -20,24 +28,37 @@ class ControlsWidget(QWidget):
     load_object_signal = pyqtSignal()
     load_hand_signal = pyqtSignal()
     
-    # 流程 2: 拾取
-    start_picking_signal = pyqtSignal(bool) # 发送 (is_checked)
+    # 流程 2: 锚点管理（新设计）
+    add_anchor_pair_signal = pyqtSignal()  # 开始添加新锚点对
+    confirm_anchor_pair_signal = pyqtSignal()  # 确认添加锚点对
+    delete_anchor_signal = pyqtSignal(int)  # 删除指定索引的锚点对
+    toggle_anchor_signal = pyqtSignal(int, bool)  # 启用/禁用锚点对
     
-    # 流程 3: 锚点列表
-    delete_anchor_signal = pyqtSignal(int) # 发送 (row_index)
-    anchor_settings_changed_signal = pyqtSignal(dict) # 发送 (settings_dict)
+    # 流程 3: 可视化
+    visualization_settings_changed_signal = pyqtSignal(dict)
     
-    # 流程 5: 可视化
-    visualization_settings_changed_signal = pyqtSignal(dict) # 发送 (settings_dict)
-    
-    # 流程 6: 关节调试
-    manual_joint_changed_signal = pyqtSignal(str, float) # 发送 (joint_name, value)
+    # 流程 4: 关节调试
+    manual_joint_changed_signal = pyqtSignal(str, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         
+        # 预定义的颜色方案（用于不同的锚点对）
+        self.anchor_colors = [
+            QColor(255, 0, 0),      # 红色
+            QColor(0, 128, 255),    # 蓝色
+            QColor(0, 255, 0),      # 绿色
+            QColor(255, 165, 0),    # 橙色
+            QColor(255, 0, 255),    # 品红
+            QColor(0, 255, 255),    # 青色
+            QColor(255, 255, 0),    # 黄色
+            QColor(128, 0, 128),    # 紫色
+            QColor(255, 192, 203),  # 粉色
+            QColor(128, 128, 0),    # 橄榄绿
+        ]
+        
         # 存储动态创建的关节控件
-        self.joint_controls = {} # {joint_name: {'slider': QSlider, 'spinbox': QDoubleSpinBox}}
+        self.joint_controls = {}
         
         # 主布局
         main_layout = QVBoxLayout(self)
@@ -49,8 +70,8 @@ class ControlsWidget(QWidget):
         # 1. 创建 "文件 & 控制" 选项卡
         self.tab_widget.addTab(self._create_control_tab(), "文件 & 控制")
         
-        # 2. 创建 "锚点" 选项卡
-        self.tab_widget.addTab(self._create_anchors_tab(), "锚点设置")
+        # 2. 创建 "锚点" 选项卡（重新设计）
+        self.tab_widget.addTab(self._create_anchors_tab(), "锚点配对")
         
         # 3. 创建 "可视化" 选项卡
         self.tab_widget.addTab(self._create_viz_tab(), "可视化")
@@ -58,95 +79,141 @@ class ControlsWidget(QWidget):
         # 4. 创建 "关节调试" 选项卡
         self.tab_widget.addTab(self._create_joints_tab(), "关节调试")
         
-        # 设置最小高度，使其不会被过度压缩
         self.setMinimumHeight(200)
 
-    # --- 选项卡创建 (私有方法) ---
+    # --- 选项卡创建 ---
 
     def _create_control_tab(self) -> QWidget:
-        """创建 "文件 & 控制" 选项卡的内容"""
+        """创建 "文件 & 控制" 选项卡"""
         tab_widget = QWidget()
         layout = QVBoxLayout(tab_widget)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         
         # 文件加载组
-        load_group = QGroupBox("加载模型")
+        load_group = QGroupBox("1. 加载模型")
         load_layout = QVBoxLayout(load_group)
         
-        self.load_obj_button = QPushButton("1. 加载物体 (Mesh)")
-        self.load_hand_button = QPushButton("2. 加载机械手 (URDF)")
+        self.load_obj_button = QPushButton("📦 加载物体 (OBJ/STL)")
+        self.load_hand_button = QPushButton("🤖 加载机械手 (URDF)")
+        
+        self.load_obj_button.setMinimumHeight(40)
+        self.load_hand_button.setMinimumHeight(40)
         
         load_layout.addWidget(self.load_obj_button)
         load_layout.addWidget(self.load_hand_button)
         
-        # 拾取控制组
-        picking_group = QGroupBox("锚点设置")
-        picking_layout = QVBoxLayout(picking_group)
-        
-        self.start_picking_button = QPushButton("3. 开始设置锚点")
-        self.start_picking_button.setCheckable(True) # 设置为可切换的按钮
-        
-        picking_layout.addWidget(self.start_picking_button)
+        # 说明文本
+        info_label = QLabel(
+            "💡 提示：\n"
+            "1. 先加载物体和机械手\n"
+            "2. 切换到「锚点配对」标签\n"
+            "3. 点击「添加锚点对」开始配对\n"
+            "4. 点击手部和物体上的对应点\n"
+            "5. 优化会实时更新"
+        )
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("QLabel { background-color: #f0f8ff; padding: 10px; border-radius: 5px; }")
         
         layout.addWidget(load_group)
-        layout.addWidget(picking_group)
+        layout.addWidget(info_label)
+        layout.addStretch()
         
-        # --- 连接信号 ---
-        self.load_obj_button.clicked.connect(self.load_object_signal)
-        self.load_hand_button.clicked.connect(self.load_hand_signal)
-        self.start_picking_button.toggled.connect(self.start_picking_signal)
+        # 连接信号
+        self.load_obj_button.clicked.connect(self.load_object_signal.emit)
+        self.load_hand_button.clicked.connect(self.load_hand_signal.emit)
         
         return tab_widget
 
     def _create_anchors_tab(self) -> QWidget:
-        """创建 "锚点设置" 选项卡的内容"""
+        """创建改进的 "锚点配对" 选项卡"""
         tab_widget = QWidget()
-        layout = QHBoxLayout(tab_widget)
+        layout = QVBoxLayout(tab_widget)
         
-        # 左侧：列表
+        # 顶部：添加锚点对按钮（醒目）
+        add_button_layout = QHBoxLayout()
+        self.add_anchor_button = QPushButton("➕ 添加新锚点对")
+        self.add_anchor_button.setMinimumHeight(50)
+        self.add_anchor_button.setStyleSheet(
+            "QPushButton { "
+            "background-color: #4CAF50; "
+            "color: white; "
+            "font-size: 16px; "
+            "font-weight: bold; "
+            "border-radius: 8px; "
+            "} "
+            "QPushButton:hover { background-color: #45a049; } "
+            "QPushButton:pressed { background-color: #3d8b40; }"
+        )
+        add_button_layout.addWidget(self.add_anchor_button)
+        
+        # 确定按钮（初始隐藏）
+        self.confirm_anchor_button = QPushButton("✅ 确定添加锚点对")
+        self.confirm_anchor_button.setMinimumHeight(50)
+        self.confirm_anchor_button.setStyleSheet(
+            "QPushButton { "
+            "background-color: #2196F3; "
+            "color: white; "
+            "font-size: 16px; "
+            "font-weight: bold; "
+            "border-radius: 8px; "
+            "} "
+            "QPushButton:hover { background-color: #1976D2; } "
+            "QPushButton:pressed { background-color: #1565C0; }"
+        )
+        self.confirm_anchor_button.setVisible(False)
+        add_button_layout.addWidget(self.confirm_anchor_button)
+        
+        layout.addLayout(add_button_layout)
+        
+        # 说明
+        instruction_label = QLabel(
+            "🎯 点击「添加新锚点对」，然后：\n"
+            "   1️⃣ 在右侧视窗点击手部位置\n"
+            "   2️⃣ 在左侧视窗点击物体对应位置\n"
+            "   3️⃣ 点击「确定」按钮完成添加\n"
+            "   ✨ 然后可以继续添加更多锚点对！"
+        )
+        instruction_label.setStyleSheet("QLabel { background-color: #fffacd; padding: 8px; border-radius: 5px; }")
+        instruction_label.setWordWrap(True)
+        layout.addWidget(instruction_label)
+        
+        # 中间：锚点对列表
         list_group = QGroupBox("锚点对列表")
         list_layout = QVBoxLayout(list_group)
         
         self.anchor_list_widget = QListWidget()
-        self.delete_anchor_button = QPushButton("删除选中锚点")
-        
+        self.anchor_list_widget.setMinimumHeight(200)
         list_layout.addWidget(self.anchor_list_widget)
-        list_layout.addWidget(self.delete_anchor_button)
         
-        # 右侧：设置
-        settings_group = QGroupBox("可视化设置")
-        settings_layout = QGridLayout(settings_group)
+        # 列表操作按钮
+        button_layout = QHBoxLayout()
+        self.delete_anchor_button = QPushButton("🗑️ 删除")
+        self.clear_all_button = QPushButton("🧹 清空所有")
         
-        self.anchor_size_label = QLabel("锚点球大小 (m):")
-        self.anchor_size_spinbox = QDoubleSpinBox()
-        self.anchor_size_spinbox.setRange(0.001, 0.1)
-        self.anchor_size_spinbox.setValue(0.005)
-        self.anchor_size_spinbox.setSingleStep(0.001)
+        button_layout.addWidget(self.delete_anchor_button)
+        button_layout.addWidget(self.clear_all_button)
+        list_layout.addLayout(button_layout)
         
-        settings_layout.addWidget(self.anchor_size_label, 0, 0)
-        settings_layout.addWidget(self.anchor_size_spinbox, 0, 1)
-        # (未来可以添加颜色按钮等)
-        settings_layout.setRowStretch(2, 1) # 占位
+        layout.addWidget(list_group)
         
-        layout.addWidget(list_group, stretch=2)
-        layout.addWidget(settings_group, stretch=1)
-        
-        # --- 连接信号 ---
+        # 连接信号
+        self.add_anchor_button.clicked.connect(self.add_anchor_pair_signal.emit)
+        self.confirm_anchor_button.clicked.connect(self.confirm_anchor_pair_signal.emit)
         self.delete_anchor_button.clicked.connect(self._on_delete_anchor)
-        self.anchor_size_spinbox.valueChanged.connect(self._on_anchor_settings_changed)
+        self.clear_all_button.clicked.connect(self._on_clear_all_anchors)
         
         return tab_widget
 
     def _create_viz_tab(self) -> QWidget:
-        """创建 "可视化" 选项卡的内容"""
+        """创建 "可视化" 选项卡"""
         tab_widget = QWidget()
         layout = QVBoxLayout(tab_widget)
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        # 辅助函数创建滑块
+        # 辅助函数
         def create_opacity_slider() -> QSlider:
             slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(0, 100) # 0% to 100%
+            slider.setRange(0, 100)
             slider.setValue(100)
             return slider
 
@@ -154,7 +221,7 @@ class ControlsWidget(QWidget):
         hand_group = QGroupBox("中间视图: 机械手 (动态)")
         hand_layout = QGridLayout(hand_group)
         self.hand_opacity_slider = create_opacity_slider()
-        self.hand_opacity_slider.setValue(70) # 默认半透明
+        self.hand_opacity_slider.setValue(70)
         hand_layout.addWidget(QLabel("透明度:"), 0, 0)
         hand_layout.addWidget(self.hand_opacity_slider, 0, 1)
         
@@ -162,41 +229,58 @@ class ControlsWidget(QWidget):
         obj_group = QGroupBox("中间视图: 物体")
         obj_layout = QGridLayout(obj_group)
         self.object_opacity_slider = create_opacity_slider()
-        self.object_opacity_slider.setValue(100) # 默认不透明
+        self.object_opacity_slider.setValue(100)
         obj_layout.addWidget(QLabel("透明度:"), 0, 0)
         obj_layout.addWidget(self.object_opacity_slider, 0, 1)
+        
+        # 锚点可视化
+        anchor_group = QGroupBox("锚点可视化")
+        anchor_layout = QGridLayout(anchor_group)
+        
+        self.anchor_size_label = QLabel("球体大小 (mm):")
+        self.anchor_size_spinbox = QDoubleSpinBox()
+        self.anchor_size_spinbox.setRange(1.0, 20.0)
+        self.anchor_size_spinbox.setValue(8.0)
+        self.anchor_size_spinbox.setSingleStep(0.5)
+        self.anchor_size_spinbox.setSuffix(" mm")
+        
+        self.show_lines_checkbox = QCheckBox("显示连接线")
+        self.show_lines_checkbox.setChecked(True)
+        
+        anchor_layout.addWidget(self.anchor_size_label, 0, 0)
+        anchor_layout.addWidget(self.anchor_size_spinbox, 0, 1)
+        anchor_layout.addWidget(self.show_lines_checkbox, 1, 0, 1, 2)
 
         layout.addWidget(hand_group)
         layout.addWidget(obj_group)
+        layout.addWidget(anchor_group)
+        layout.addStretch()
         
-        # --- 连接信号 ---
+        # 连接信号
         self.hand_opacity_slider.valueChanged.connect(self._on_viz_settings_changed)
         self.object_opacity_slider.valueChanged.connect(self._on_viz_settings_changed)
+        self.anchor_size_spinbox.valueChanged.connect(self._on_viz_settings_changed)
+        self.show_lines_checkbox.stateChanged.connect(self._on_viz_settings_changed)
         
         return tab_widget
 
     def _create_joints_tab(self) -> QWidget:
-        """创建 "关节调试" 选项卡的内容"""
-        # 这个选项卡是动态填充的
+        """创建 "关节调试" 选项卡"""
         tab_widget = QWidget()
         main_layout = QVBoxLayout(tab_widget)
         
-        # 占位符
         self.joints_placeholder_label = QLabel(
-            "加载机械手 (URDF) 后，将在此处显示所有可动关节的控制器。"
+            "加载机械手后，这里会显示所有关节的控制器"
         )
         self.joints_placeholder_label.setWordWrap(True)
         self.joints_placeholder_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         
-        # 滚动区域
         scroll_area = QScrollArea()
         scroll_area.setWidgetResizable(True)
         
-        # 滚动区域的内容
         self.scroll_content_widget = QWidget()
-        self.joints_layout = QVBoxLayout(self.scroll_content_widget) # 关键布局
+        self.joints_layout = QVBoxLayout(self.scroll_content_widget)
         self.joints_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
-        
         self.joints_layout.addWidget(self.joints_placeholder_label)
         
         scroll_area.setWidget(self.scroll_content_widget)
@@ -204,198 +288,176 @@ class ControlsWidget(QWidget):
         
         return tab_widget
 
-    # --- 公共槽 (Public Slots) ---
-    # 这些方法将由 main_window 或 data_manager 调用
+    # --- 槽函数 ---
+
+    def _on_delete_anchor(self) -> None:
+        """删除选中的锚点对"""
+        current_row = self.anchor_list_widget.currentRow()
+        if current_row >= 0:
+            self.delete_anchor_signal.emit(current_row)
+
+    def _on_clear_all_anchors(self) -> None:
+        """清空所有锚点对"""
+        count = self.anchor_list_widget.count()
+        # 从后向前删除
+        for i in range(count - 1, -1, -1):
+            self.delete_anchor_signal.emit(i)
+
+    def _on_viz_settings_changed(self) -> None:
+        """可视化设置改变"""
+        settings = {
+            'hand_opacity': self.hand_opacity_slider.value() / 100.0,
+            'object_opacity': self.object_opacity_slider.value() / 100.0,
+            'anchor_size': self.anchor_size_spinbox.value() / 1000.0,  # mm to m
+            'show_lines': self.show_lines_checkbox.isChecked()
+        }
+        self.visualization_settings_changed_signal.emit(settings)
+
+    # --- 公共方法 (由 main_window/data_manager 调用) ---
 
     @pyqtSlot(list)
-    def update_anchor_list(self, anchor_pairs: list[dict]) -> None:
+    def update_anchor_list(self, anchor_pairs: list) -> None:
         """
-        清空并重新填充锚点列表。
-        :param anchor_pairs: 锚点对的完整列表。
+        更新锚点对列表的显示
+        
+        :param anchor_pairs: 锚点对列表
         """
         self.anchor_list_widget.clear()
+        
         for i, pair in enumerate(anchor_pairs):
-            # 格式化坐标
-            h_pt = np.array(pair['hand_point']).round(3)
-            o_pt = np.array(pair['obj_point']).round(3)
-            # 在 'hand_point' 中找到 'link_name'
-            link_name = pair.get('hand_link_name', 'unknown_link') # 优雅地处理
+            # 获取颜色
+            color = self.anchor_colors[i % len(self.anchor_colors)]
             
-            display_text = f"{i+1}: [{link_name}] @ {h_pt}  ->  [Object] @ {o_pt}"
-            self.anchor_list_widget.addItem(display_text)
+            # 创建列表项
+            link_name = pair.get('hand_link_name', '未知')
+            enabled = pair.get('enabled', True)
+            
+            item_text = f"锚点对 {i+1}: {link_name}"
+            if not enabled:
+                item_text += " (已禁用)"
+            
+            item = QListWidgetItem(item_text)
+            
+            # 设置颜色
+            item.setBackground(QBrush(color.lighter(180)))
+            item.setForeground(QBrush(QColor(0, 0, 0)))
+            
+            # 如果禁用，设置灰色
+            if not enabled:
+                item.setForeground(QBrush(QColor(128, 128, 128)))
+            
+            self.anchor_list_widget.addItem(item)
 
     @pyqtSlot(list)
-    def create_joint_controls(self, joint_info_list: list[dict]) -> None:
+    def populate_joint_controls(self, joint_info_list: list) -> None:
         """
-        动态创建所有关节的滑块和输入框。
-        :param joint_info_list: [{'name': str, 'min': float, 'max': float, 'default': float}]
+        根据机械手的关节信息，动态生成关节控制滑块
+        
+        :param joint_info_list: 列表，每个元素是一个字典:
+                                {'name': str, 'min': float, 'max': float, 'default': float}
         """
-        # 1. 清除旧控件
-        for joint_name, controls in self.joint_controls.items():
-            controls['slider'].deleteLater()
-            controls['spinbox'].deleteLater()
-            controls['label'].deleteLater()
-            controls['layout_widget'].deleteLater()
-        self.joint_controls.clear()
+        # 清除占位符
+        self.joints_placeholder_label.setParent(None)
         
-        if not joint_info_list:
-            self.joints_placeholder_label.show()
-            return
-            
-        self.joints_placeholder_label.hide()
+        # 清除旧控件
+        for joint_name in list(self.joint_controls.keys()):
+            controls = self.joint_controls.pop(joint_name)
+            controls['frame'].setParent(None)
         
-        # 2. 创建新控件
+        # 为每个关节创建控件
         for joint_info in joint_info_list:
             name = joint_info['name']
             min_val = joint_info['min']
             max_val = joint_info['max']
-            default_val = joint_info['default']
+            default_val = joint_info.get('default', 0.0)
             
-            # 使用一个 widget 来容纳布局，方便删除
-            layout_widget = QWidget()
-            control_layout = QHBoxLayout(layout_widget)
+            # 创建框架
+            frame = QFrame()
+            frame.setFrameShape(QFrame.Shape.StyledPanel)
+            frame_layout = QGridLayout(frame)
             
+            # 标签
             label = QLabel(f"{name}:")
             label.setMinimumWidth(100)
             
-            # 滑块使用整数，精度为 0.01
+            # 滑块
             slider = QSlider(Qt.Orientation.Horizontal)
-            slider_min = int(min_val * 100)
-            slider_max = int(max_val * 100)
-            slider.setRange(slider_min, slider_max)
+            slider.setRange(int(min_val * 1000), int(max_val * 1000))
+            slider.setValue(int(default_val * 1000))
             
+            # 数值框
             spinbox = QDoubleSpinBox()
             spinbox.setRange(min_val, max_val)
+            spinbox.setValue(default_val)
             spinbox.setSingleStep(0.01)
             spinbox.setDecimals(3)
             
-            # 设置默认值
-            spinbox.setValue(default_val) # 这会触发 _on_spinbox_moved
-            slider.setValue(int(default_val * 100))
+            # 布局
+            frame_layout.addWidget(label, 0, 0)
+            frame_layout.addWidget(slider, 0, 1)
+            frame_layout.addWidget(spinbox, 0, 2)
+            
+            # 连接信号
+            slider.valueChanged.connect(
+                lambda val, sb=spinbox: sb.setValue(val / 1000.0)
+            )
+            spinbox.valueChanged.connect(
+                lambda val, sl=slider: sl.setValue(int(val * 1000))
+            )
+            spinbox.valueChanged.connect(
+                lambda val, jname=name: self.manual_joint_changed_signal.emit(jname, val)
+            )
             
             # 添加到布局
-            control_layout.addWidget(label, stretch=1)
-            control_layout.addWidget(spinbox, stretch=1)
-            control_layout.addWidget(slider, stretch=3)
+            self.joints_layout.addWidget(frame)
             
-            self.joints_layout.addWidget(layout_widget)
-            
-            # 存储控件
+            # 存储
             self.joint_controls[name] = {
-                'label': label,
+                'frame': frame,
                 'slider': slider,
-                'spinbox': spinbox,
-                'layout_widget': layout_widget
+                'spinbox': spinbox
             }
-            
-            # --- 连接信号 ---
-            # 关键：连接滑块和输入框以实现同步
-            slider.valueChanged.connect(self._on_slider_moved)
-            spinbox.valueChanged.connect(self._on_spinbox_moved)
 
-    # --- 内部槽 (Private Slots) ---
-    # 这些方法用于响应 UI 交互并发射信号
-
-    @pyqtSlot(int)
-    def _on_slider_moved(self, value: int) -> None:
-        """当滑块移动时，更新对应的 spinbox 并发射信号。"""
-        float_value = value / 100.0
+    def get_anchor_color(self, index: int) -> tuple:
+        """
+        获取指定索引的锚点对颜色 (RGB, 0-1范围)
         
-        # 找到是哪个滑块
-        sender_slider = self.sender()
-        for joint_name, controls in self.joint_controls.items():
-            if controls['slider'] == sender_slider:
-                # 1. 更新 SpinBox (并阻止其发信号，防止循环)
-                controls['spinbox'].blockSignals(True)
-                controls['spinbox'].setValue(float_value)
-                controls['spinbox'].blockSignals(False)
-                
-                # 2. 发射主信号
-                self.manual_joint_changed_signal.emit(joint_name, float_value)
-                return
-
-    @pyqtSlot(float)
-    def _on_spinbox_moved(self, value: float) -> None:
-        """当 spinbox 值改变时，更新对应的滑块并发射信号。"""
-        int_value = int(value * 100)
+        :param index: 锚点对索引
+        :return: (r, g, b) 元组
+        """
+        color = self.anchor_colors[index % len(self.anchor_colors)]
+        return (color.redF(), color.greenF(), color.blueF())
+    
+    def show_confirm_button(self, show: bool = True) -> None:
+        """
+        显示或隐藏确定按钮
         
-        # 找到是哪个 spinbox
-        sender_spinbox = self.sender()
-        for joint_name, controls in self.joint_controls.items():
-            if controls['spinbox'] == sender_spinbox:
-                # 1. 更新 Slider (并阻止其发信号)
-                controls['slider'].blockSignals(True)
-                controls['slider'].setValue(int_value)
-                controls['slider'].blockSignals(False)
-                
-                # 2. 发射主信号 (SpinBox 是信号的"真实来源")
-                self.manual_joint_changed_signal.emit(joint_name, value)
-                return
-
-    @pyqtSlot()
-    def _on_viz_settings_changed(self) -> None:
-        """收集所有可视化设置并发射信号。"""
-        settings = {
-            'hand_opacity': self.hand_opacity_slider.value() / 100.0,
-            'object_opacity': self.object_opacity_slider.value() / 100.0
-        }
-        self.visualization_settings_changed_signal.emit(settings)
-
-    @pyqtSlot()
-    def _on_delete_anchor(self) -> None:
-        """当"删除"按钮被点击时，获取所选行并发射信号。"""
-        current_row = self.anchor_list_widget.currentRow()
-        if current_row >= 0: # -1 表示没有选中
-            self.delete_anchor_signal.emit(current_row)
-            
-    @pyqtSlot(float)
-    def _on_anchor_settings_changed(self, value: float) -> None:
-        """当锚点可视化设置改变时，发射信号。"""
-        settings = {
-            'size': self.anchor_size_spinbox.value()
-            # 可以在此添加 'color' 等
-        }
-        self.anchor_settings_changed_signal.emit(settings)
+        :param show: True 显示，False 隐藏
+        """
+        self.confirm_anchor_button.setVisible(show)
+    
+    # 向后兼容：create_joint_controls 是 populate_joint_controls 的别名
+    create_joint_controls = populate_joint_controls
 
 
-# --- 用于独立测试 ---
+# --- 测试代码 ---
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     
-    window = QMainWindow()
-    controls = ControlsWidget()
+    widget = ControlsWidget()
+    widget.setWindowTitle("改进的控制面板")
+    widget.resize(400, 600)
+    widget.show()
     
-    # --- 测试动态关节创建 ---
-    test_joints = [
-        {'name': 'joint_1', 'min': -3.14, 'max': 3.14, 'default': 0.0},
-        {'name': 'joint_2', 'min': -1.57, 'max': 1.57, 'default': 0.5},
-        {'name': 'long_joint_name_6', 'min': 0.0, 'max': 1.0, 'default': 0.2},
-    ]
-    controls.create_joint_controls(test_joints)
+    # 模拟添加锚点
+    def test_add_anchor():
+        test_pairs = [
+            {'hand_link_name': 'forearm', 'enabled': True},
+            {'hand_link_name': 'palm', 'enabled': True},
+            {'hand_link_name': 'finger1', 'enabled': False},
+        ]
+        widget.update_anchor_list(test_pairs)
     
-    # --- 测试信号连接 ---
-    def on_joint_change(name, val):
-        print(f"[信号] 关节: {name} | 值: {val:.3f}")
-        
-    def on_viz_change(settings):
-        print(f"[信号] 可视化: {settings}")
-        
-    def on_pick_toggle(is_active):
-        print(f"[信号] 拾取模式: {is_active}")
-
-    controls.manual_joint_changed_signal.connect(on_joint_change)
-    controls.visualization_settings_changed_signal.connect(on_viz_change)
-    controls.start_picking_signal.connect(on_pick_toggle)
+    widget.add_anchor_button.clicked.connect(test_add_anchor)
     
-    # --- 测试列表更新 ---
-    test_anchors = [
-        {'hand_point': [0.1, 0.2, 0.3], 'obj_point': [1.1, 1.2, 1.3], 'hand_link_name': 'link_1'},
-        {'hand_point': [0.4, 0.5, 0.6], 'obj_point': [1.4, 1.5, 1.6], 'hand_link_name': 'link_2'},
-    ]
-    controls.update_anchor_list(test_anchors)
-
-    window.setCentralWidget(controls)
-    window.setWindowTitle("ControlsWidget - 独立测试")
-    window.setGeometry(300, 300, 500, 400)
-    window.show()
     sys.exit(app.exec())

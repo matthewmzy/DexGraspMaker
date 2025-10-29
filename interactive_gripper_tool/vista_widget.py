@@ -238,19 +238,25 @@ class VistaWidget(QWidget):
         for i, pair in enumerate(anchor_pairs):
             obj_point = pair['obj_point']
             hand_point = pair.get('hand_point', obj_point)
-            color = color_func(pair)
+            color = color_func(i)
             
             obj_actor = self.plotter.add_mesh(
-                pyvista.Sphere(radius=sphere_radius, center=obj_point),
+                pyvista.Sphere(radius=sphere_radius, center=(0, 0, 0)),
                 color=color,
                 name=f"anchor_obj_{i}"
             )
+            obj_translation = np.eye(4)
+            obj_translation[:3, 3] = obj_point
+            obj_actor.user_matrix = obj_translation
             
             hand_actor = self.plotter.add_mesh(
-                pyvista.Sphere(radius=sphere_radius, center=hand_point),
+                pyvista.Sphere(radius=sphere_radius, center=(0, 0, 0)),
                 color=color,
                 name=f"anchor_hand_{i}"
             )
+            hand_translation = np.eye(4)
+            hand_translation[:3, 3] = hand_point
+            hand_actor.user_matrix = hand_translation
             
             self.anchor_actors.append({
                 'obj_actor': obj_actor,
@@ -276,22 +282,20 @@ class VistaWidget(QWidget):
             
             actors = self.anchor_actors[i]
             hand_point = pair['hand_point']
-            color = self.color_func(pair)
+            color = self.color_func(i)
             
-            # 移除旧的手部球体
-            self.plotter.remove_actor(actors['hand_actor'])
+            # 更新位置
+            hand_translation = np.eye(4)
+            hand_translation[:3, 3] = hand_point
+            actors['hand_actor'].user_matrix = hand_translation
             
-            # 添加新的手部球体
-            actors['hand_actor'] = self.plotter.add_mesh(
-                pyvista.Sphere(radius=self.sphere_radius, center=hand_point),
-                color=color,
-                name=f"anchor_hand_{i}"
-            )
+            # 更新颜色如果改变
+            if actors['color'] != color:
+                actors['hand_actor'].prop.color = color
+                actors['color'] = color
             
-            actors['color'] = color
             actors['pair'] = pair
         
-        print(f"VistaWidget: 已快速更新 {len(updated_pairs)} 个锚点位置。")
 
     # --- 内部回调 (Internal Callbacks) ---
 

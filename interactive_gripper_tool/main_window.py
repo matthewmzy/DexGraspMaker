@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
 
 from vista_widget import VistaWidget
-from controls_widget_v2 import ControlsWidget  # 使用新版 UI
+from controls_widget import ControlsWidget  # 使用新版 UI
 from data_manager import DataManager
 from optimization_thread import OptimizationThread
 
@@ -144,9 +144,17 @@ class MainWindow(QMainWindow):
         self.controls_widget.add_anchor_pair_signal.connect(
             lambda: self.data_manager.set_picking_mode(True)
         )
+        
+        # 控件 (确定按钮) -> 数据管理器 (确认添加锚点对)
+        self.controls_widget.confirm_anchor_pair_signal.connect(
+            self.data_manager.confirm_anchor_pair
+        )
 
         # 数据管理器 (状态改变) -> 3D 视窗 (启用/禁用拾取功能)
         self.data_manager.picking_mode_changed_signal.connect(self.on_picking_mode_changed)
+        
+        # 数据管理器 (锚点对准备状态) -> 控件 (显示/隐藏确定按钮)
+        self.data_manager.anchor_pair_ready_signal.connect(self.controls_widget.show_confirm_button)
 
         # 3D 视窗 (用户点击) -> 数据管理器 (记录坐标)
         self.view_left.point_picked_signal.connect(self.data_manager.on_object_point_picked)
@@ -260,8 +268,8 @@ class MainWindow(QMainWindow):
             self.view_right.update_anchor_spheres([], lambda p: 'red', 0.005)
             self.view_center.update_anchor_spheres([], lambda p: 'red', 0.005)
             return
-        
-        color_func = lambda pair: self.get_color_for_pair(anchor_pairs.index(pair))
+
+        color_func = lambda i: self.get_color_for_pair(i)
         sphere_radius = self.controls_widget.anchor_size_spinbox.value() / 1000.0  # mm转m
         
         self.view_left.update_anchor_spheres(
@@ -342,8 +350,12 @@ class MainWindow(QMainWindow):
                 updated_pairs.append(pair)
         
         # 使用快速位置更新（不重建actors，性能更好）
+        color_func = lambda i: self.get_color_for_pair(i)
+        self.view_left.color_func = color_func
+        self.view_right.color_func = color_func
+        self.view_center.color_func = color_func
         self.view_left.update_anchor_positions_fast(updated_pairs)
-        self.view_right.update_anchor_positions_fast(updated_pairs)
+        # self.view_right.update_anchor_positions_fast(updated_pairs)
         self.view_center.update_anchor_positions_fast(updated_pairs)
 
     def load_default_assets(self) -> None:
