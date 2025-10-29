@@ -1,0 +1,71 @@
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+*.egg
+*.whl
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Type-check / linters caches
+.mypy_cache/
+.ruff_cache/
+.pyre/
+
+# Sphinx / docs build
+docs/_build/
+docs/build/
+
+# Editor directories and files
+.idea/
+# If you don't want to version VSCode settings, uncomment:
+# .vscode/
+
+# Jupyter
+.ipynb_checkpoints
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# Compiled extensions / binaries
+*.so
+*.dylib
+*.dll
+
+# Python bytecode / temp
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts, caches
+*.cache
+.cache/
+
+# Optional: ignore thirdparty builds if you vendor them but don't want build artifacts
+thirdparty/**/build/
+thirdparty/**/dist/

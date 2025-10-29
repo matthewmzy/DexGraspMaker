@@ -9,7 +9,14 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${cwd}/interactive_gripper_tool/main.py",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "env": {
+                "LD_PRELOAD": "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+                "LIBGL_DRIVERS_PATH": "/usr/lib/x86_64-linux-gnu/dri"
+            },
+            "args": [
+                "--load-default",
+            ]
         },
     ]
 }

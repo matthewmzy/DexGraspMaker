@@ -76,6 +76,28 @@ class DataManager(QObject):
     # --- 公共槽 (Public Slots) ---
     # 这些槽由 main_window 连接到 controls_widget 的信号
 
+    def load_object_from_file(self, file_path: str) -> bool:
+        """
+        从指定路径加载物体mesh（无对话框）
+        
+        :param file_path: 物体文件路径
+        :return: 加载成功返回True
+        """
+        try:
+            self.object_mesh = pyvista.read(file_path)
+            print(f"DataManager: 已加载物体: {file_path}")
+            # 发射信号，将 mesh 数据传递给视窗
+            if max(self.object_mesh.bounds_size) > 10: # 简单检查单位
+                print("DataManager: 物体尺寸较大，正在缩放至米级单位...")
+                self.object_mesh.scale(0.001, inplace=True)
+            self.object_loaded_signal.emit(self.object_mesh)
+            self.status_message_signal.emit(f"已加载物体: {file_path}")
+            return True
+        except Exception as e:
+            print(f"DataManager: 加载物体失败: {e}")
+            self.status_message_signal.emit(f"加载物体失败: {e}")
+            return False
+
     @pyqtSlot()
     def load_object(self) -> None:
         """
@@ -108,17 +130,32 @@ class DataManager(QObject):
     def load_hand(self) -> None:
         """
         打开文件对话框以加载机械手 URDF。
-        1. 使用 yourdfpy 加载 URDF (它会处理 'package://' 并加载 meshes)。
-        2. 使用 pyroki 创建 JAX-native 的 Robot 对象。
-        3. 提取可视化 meshes 发送给 PyVista。
-        4. 提取关节信息发送给 ControlsWidget。
-        5. 发送 pyroki.Robot 对象给 OptimizationThread。
         """
         file_path, _ = QFileDialog.getOpenFileName(
             None, "加载机械手 URDF", "", "URDF 文件 (*.urdf)"
         )
         
-        if not file_path: return
+        if not file_path:
+            return # 用户取消
+        
+        self.load_hand_from_file(file_path)
+    
+    def load_hand_from_file(self, file_path: str) -> bool:
+        """
+        从指定路径加载机械手URDF（无对话框）
+        
+        1. 使用 yourdfpy 加载 URDF (它会处理 'package://' 并加载 meshes)。
+        2. 使用 pyroki 创建 JAX-native 的 Robot 对象。
+        3. 提取可视化 meshes 发送给 PyVista。
+        4. 提取关节信息发送给 ControlsWidget。
+        5. 发送 pyroki.Robot 对象给 OptimizationThread。
+        
+        :param file_path: URDF文件路径
+        :return: 加载成功返回True
+        """
+        
+        if not file_path:
+            return False
             
         try:
             # 1. 使用 yourdfpy 加载 URDF
@@ -258,17 +295,22 @@ class DataManager(QObject):
             self.hand_initial_pose_signal.emit(initial_poses)
             
             self.status_message_signal.emit(f"已加载机械手: {file_path}")
+            return True
 
         except Exception as e:
             print(f"DataManager: 加载机械手失败: {e}")
             import traceback
             traceback.print_exc()
             self.status_message_signal.emit(f"加载机械手失败: {e}")
+            return False
 
     @pyqtSlot(bool)
     def set_picking_mode(self, is_active: bool) -> None:
         """
-        切换锚点拾取模式。
+        切换锚点拾取模式
+        
+        注意：新设计中，每次添加锚点对后不会自动关闭拾取模式，
+        用户可以连续添加多个锚点对
         """
         self.is_picking_mode = is_active
         self._current_pick_stage = 'hand' # 每次都重置为先选 'hand'
@@ -284,7 +326,7 @@ class DataManager(QObject):
     @pyqtSlot(dict)
     def on_hand_point_picked(self, pick_data: dict) -> None:
         """
-        [修正] 确保 actor_name (来自 vista_widget) 的前缀被正确剥离。
+        当在右侧视窗（手部）点击时调用
         """
         if not (self.is_picking_mode and self._current_pick_stage == 'hand'):
             return
@@ -299,7 +341,7 @@ class DataManager(QObject):
              print(f"DataManager: 警告: 拾取到的 actor '{actor_name}' 没有预期的 '{prefix}' 前缀。")
              link_name = actor_name
 
-        # 检查此 link_name 是否在我们的 mesh 字典中 (即它是否真的被加载了)
+        # 检查此 link_name 是否在我们的 mesh 字典中
         if link_name not in self.hand_links_mesh_dict:
              print(f"DataManager: 错误: 拾取到的 link '{link_name}' 不在已加载的 meshes 列表中。")
              self.status_message_signal.emit(f"错误: 拾取到未知 link '{link_name}'。")
@@ -307,54 +349,87 @@ class DataManager(QObject):
 
         self._temp_hand_anchor = {
             'world_coord': pick_data['world_coord'],
+            'local_coord': pick_data.get('local_coord', pick_data['world_coord']),
             'link_name': link_name
         }
         self._current_pick_stage = 'object'
-        print(f"DataManager: 已拾取手部点: {self._temp_hand_anchor}")
-        self.status_message_signal.emit(f"已选定手部点 ({link_name})。请在 [左侧] 视窗点击物体上的对应点。")
+        print(f"DataManager: 已拾取手部点: link={link_name}, 局部坐标={self._temp_hand_anchor['local_coord']}")
+        self.status_message_signal.emit(f"✓ 手部点已选定 ({link_name})。请在 [左侧] 视窗点击物体对应点。")
 
     @pyqtSlot(dict)
     def on_object_point_picked(self, pick_data: dict) -> None:
         """
-        槽：当 [左侧] 物体视窗被点击时调用。
-        :param pick_data: {'actor_name': str, 'world_coord': [x, y, z]}
+        当在左侧视窗（物体）点击时调用
+        
+        改进：添加锚点对后立即触发优化，但保持拾取模式开启，
+        方便用户连续添加多个锚点对
         """
         if not (self.is_picking_mode and self._current_pick_stage == 'object'):
-            return # 状态不正确，忽略
+            return
             
         # 1. 创建锚点对
         new_pair = {
             'hand_point': self._temp_hand_anchor['world_coord'],
-            'hand_link_name': self._temp_hand_anchor['actor_name'], # 这是 'static_hand_link_x'
-            'obj_point': pick_data['world_coord']
+            'hand_point_local': self._temp_hand_anchor['local_coord'],
+            'hand_link_name': self._temp_hand_anchor['link_name'],
+            'obj_point': pick_data['world_coord'],
+            'obj_point_local': pick_data.get('local_coord', pick_data['world_coord']),
+            'enabled': True  # 新增：默认启用
         }
         
         # 2. 添加到列表
         self.anchor_pairs.append(new_pair)
-        print(f"DataManager: 已创建新锚点对: {new_pair}")
+        print(f"DataManager: 已创建新锚点对 #{len(self.anchor_pairs)}: {new_pair}")
         
-        # 3. 重置状态机，准备下一次拾取
+        # 3. 重置状态机到 'hand'，准备下一次拾取（保持拾取模式开启）
         self._current_pick_stage = 'hand'
         self._temp_hand_anchor = None
         
-        # 4. 发射信号
-        self.new_anchor_pair_signal.emit(self.anchor_pairs) # 发给优化器
-        self.anchor_list_updated_signal.emit(self.anchor_pairs) # 发给 UI 列表
+        # 4. 立即发射信号触发优化
+        self.new_anchor_pair_signal.emit(self.anchor_pairs)
+        self.anchor_list_updated_signal.emit(self.anchor_pairs)
         
-        self.status_message_signal.emit("锚点对已添加。请在 [右侧] 视窗点击下一个手部点。")
+        # 5. 提示用户可以继续添加
+        self.status_message_signal.emit(
+            f"✓ 锚点对 #{len(self.anchor_pairs)} 已添加！优化已开始。"
+            f"可继续在 [右侧] 点击添加更多锚点。"
+        )
 
     @pyqtSlot(int)
     def on_delete_anchor(self, row_index: int) -> None:
         """
-        槽：当 controls_widget 请求删除一个锚点时调用。
-        :param row_index: 要删除的行号。
+        删除指定的锚点对，并立即触发优化更新
         """
         if 0 <= row_index < len(self.anchor_pairs):
             removed = self.anchor_pairs.pop(row_index)
-            print(f"DataManager: 已删除锚点 {row_index}: {removed}")
+            print(f"DataManager: 已删除锚点 #{row_index+1}: {removed}")
             
-            # 重新发射更新后的列表
+            # 立即触发优化更新
             self.new_anchor_pair_signal.emit(self.anchor_pairs)
+            self.anchor_list_updated_signal.emit(self.anchor_pairs)
+            
+            self.status_message_signal.emit(f"✓ 锚点对 #{row_index+1} 已删除，优化已更新。")
+        else:
+            print(f"DataManager: 删除失败，索引 {row_index} 超出范围")
+    
+    @pyqtSlot(int, bool)
+    def on_toggle_anchor(self, row_index: int, enabled: bool) -> None:
+        """
+        启用/禁用指定的锚点对，并立即触发优化更新
+        
+        :param row_index: 锚点对索引
+        :param enabled: True=启用, False=禁用
+        """
+        if 0 <= row_index < len(self.anchor_pairs):
+            self.anchor_pairs[row_index]['enabled'] = enabled
+            status = "启用" if enabled else "禁用"
+            print(f"DataManager: 已{status}锚点对 #{row_index+1}")
+            
+            # 立即触发优化更新
+            self.new_anchor_pair_signal.emit(self.anchor_pairs)
+            self.anchor_list_updated_signal.emit(self.anchor_pairs)
+            
+            self.status_message_signal.emit(f"✓ 锚点对 #{row_index+1} 已{status}，优化已更新。")
             self.anchor_list_updated_signal.emit(self.anchor_pairs)
             self.status_message_signal.emit(f"已删除锚点 {row_index}")
         else:

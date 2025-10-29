@@ -11,6 +11,9 @@ def main():
     应用程序的主入口函数。
     """
     
+    # 检查命令行参数
+    load_default = '--load-default' in sys.argv or '-d' in sys.argv
+    
     # 1. 创建 QApplication 实例
     # sys.argv 允许从命令行传递参数给应用程序
     app = QApplication(sys.argv)
@@ -18,7 +21,7 @@ def main():
     # 2. 创建 MainWindow 实例
     # 这是我们应用程序的主窗口
     try:
-        window = MainWindow()
+        window = MainWindow(load_default=load_default)
         window.setWindowTitle("可交互式机械手位姿匹配工具 (v0.1)")
         
         # 设置一个合理的初始大小

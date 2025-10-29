@@ -9,34 +9,16 @@ import pyroki as pk
 import jaxlie
 from jax import numpy as jnp
 
-# -------------------------------------------------------------------
-# [占位符] - 辅助函数 (Numpy-based)
-# -------------------------------------------------------------------
-# 您将使用您自己的 JAX / PyTorch / ROS 运动学库替换这些。
+# 导入优化模块
+from optimization import (
+    OptimizerState,
+    AnchorPointEnergy,
+    JointLimitEnergy,
+    CollisionAvoidanceEnergy,
+    CompositeEnergy,
+    create_adam,
+)
 
-def _create_translation(x: float, y: float, z: float) -> np.ndarray:
-    """创建一个 4x4 平移矩阵。"""
-    mat = np.eye(4)
-    mat[0:3, 3] = [x, y, z]
-    return mat
-
-def _create_z_rotation(angle_rad: float) -> np.ndarray:
-    """创建一个 4x4 Z轴 旋转矩阵。"""
-    mat = np.eye(4)
-    cos_a = np.cos(angle_rad)
-    sin_a = np.sin(angle_rad)
-    mat[0, 0] = cos_a
-    mat[0, 1] = -sin_a
-    mat[1, 0] = sin_a
-    mat[1, 1] = cos_a
-    return mat
-
-def _create_pose(trans: list | np.ndarray, 
-                 rot_z_rad: float = 0.0) -> np.ndarray:
-    """创建一个简单的位姿。"""
-    return _create_translation(*trans) @ _create_z_rotation(rot_z_rad)
-    
-# -------------------------------------------------------------------
 
 class OptimizationThread(QThread):
     """
@@ -78,6 +60,11 @@ class OptimizationThread(QThread):
         
         # 5. 名称前缀 (必须与 main_window 中设置的一致)
         self.actor_name_prefix = "dyn_hand_"
+        
+        # 6. 优化器和能量函数
+        self.optimizer = None
+        self.energy_function = None
+        self._setup_optimization()
 
     def stop(self) -> None:
         """
@@ -86,6 +73,56 @@ class OptimizationThread(QThread):
         with QMutexLocker(self.mutex):
             self._is_running = False
             self.wait_condition.wakeAll() # 唤醒 'run' 循环以便退出
+    
+    def _setup_optimization(self) -> None:
+        """
+        设置优化器和能量函数
+        
+        可以通过修改这个方法来切换不同的优化器和能量组合
+        """
+        # 创建能量函数
+        anchor_energy = AnchorPointEnergy(weight=1.0)
+        joint_limit_energy = JointLimitEnergy(weight=0.5, margin=0.1)
+        # collision_energy = CollisionAvoidanceEnergy(weight=0.1, margin=0.01)
+        
+        # 组合能量函数
+        self.energy_function = CompositeEnergy([
+            anchor_energy,
+            joint_limit_energy,
+            # collision_energy  # 暂时禁用，需要实现碰撞检测
+        ])
+        
+        # 创建高性能 Optax Adam 优化器
+        self.optimizer = create_adam(
+            learning_rate=0.01,
+            clip_grad=1.0
+        )
+    
+    def set_optimizer(self, optimizer_type: str = "adam", **kwargs):
+        """
+        动态切换优化器
+        
+        Args:
+            optimizer_type: "adam", "adamw", "lion", "sgd"
+            **kwargs: 优化器参数
+        """
+        from optimization import create_adamw, create_lion, GradientDescentOptimizer
+        
+        with QMutexLocker(self.mutex):
+            if optimizer_type.lower() == "adam":
+                self.optimizer = create_adam(**kwargs)
+            elif optimizer_type.lower() == "adamw":
+                self.optimizer = create_adamw(**kwargs)
+            elif optimizer_type.lower() == "lion":
+                self.optimizer = create_lion(**kwargs)
+            elif optimizer_type.lower() in ["gd", "sgd"]:
+                self.optimizer = GradientDescentOptimizer(**kwargs)
+            else:
+                print(f"OptimizationThread: 未知优化器类型 '{optimizer_type}'")
+                return
+            
+            print(f"OptimizationThread: 优化器已切换为 {optimizer_type}")
+
 
     # --- 线程主循环 ---
 
@@ -138,18 +175,12 @@ class OptimizationThread(QThread):
             
             try:
                 if is_optimizing:
-                    # A. 运行一步梯度下降
-                    
-                    # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ [用户: 在此替换] ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-                    # 这是您调用 JAX/PyTorch model.step() 的地方
-                    
-                    # `_mock_optimization_step` 只是模拟计算
-                    new_pose, new_joints = self._mock_optimization_step(
+                    # A. 运行一步梯度下降（真实优化）
+                    new_pose, new_joints = self._optimization_step(
                         local_anchors, 
                         self.current_base_pose, 
                         self.current_joint_values
                     )
-                    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ [用户: 替换结束] ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
                     
                 else:
                     # B. 仅手动更新或空闲
@@ -161,15 +192,10 @@ class OptimizationThread(QThread):
                 # C. 运行正向运动学 (FK)
                 # 无论哪种情况，我们都需要计算FK以进行可视化
                 
-                # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼ [用户: 在此替换] ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-                # 这是您调用 JAX/PyTorch FK 的地方
-                
-                # `_mock_forward_kinematics` 只是模拟FK
                 link_poses_dict = self._run_forward_kinematics(
                     new_pose, 
                     new_joints
                 )
-                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲ [用户: 替换结束] ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
             except Exception as e:
                 print(f"OptimizationThread: 计算错误: {e}")
@@ -268,107 +294,124 @@ class OptimizationThread(QThread):
                 self.wait_condition.wakeAll() # 唤醒 'run' 循环以应用FK
 
     # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-    # ▼▼▼▼▼▼ [用户: 这是你唯一需要替换的函数] ▼▼▼▼▼▼
-    # ▼▼▼▼▼▼▼T▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+    # ▼▼▼▼▼▼ [真实优化实现] ▼▼▼▼▼▼
+    # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
 
-    def _mock_optimization_step(self, 
-                                anchors: list[dict], 
-                                current_pose: np.ndarray, 
-                                current_joints: dict[str, float]
-                                ) -> tuple[np.ndarray, dict[str, float]]:
+    def _prepare_anchor_data(self, anchors: list[dict]) -> list[dict]:
         """
-        [占位符] 模拟一步优化。
+        准备锚点数据，添加 link 索引
         
-        这是你实现 JAX 梯度下降的地方。
-        
-        你的真实 JAX JIT 函数 (`_jax_step`) 将会使用:
-        1. `self.robot` (你的 `pk.Robot` 实例)
-        2. `self.current_base_pose` (你需要将其转为 jaxlie.SE3)
-        3. `self.current_joint_values` (你需要将其转为 jnp.array)
-        4. `self.anchor_pairs` (你需要将其转为 JAX 数组,
-           特别是包含 hand_point 的局部坐标和 hand_link_name 对应的 link_index)
-        
-        --- 模拟逻辑 (保持不变) ---
+        Args:
+            anchors: 原始锚点列表，包含 hand_link_name
+            
+        Returns:
+            处理后的锚点列表，添加了 hand_link_idx
         """
-        new_pose = current_pose.copy()
-        new_joints = current_joints.copy()
-        
         if not anchors or self.robot is None:
+            return []
+        
+        prepared_anchors = []
+        link_names = self.robot.links.names
+        
+        for anchor in anchors:
+            # 创建副本
+            new_anchor = anchor.copy()
+            
+            # 查找 link 索引
+            link_name = anchor.get('hand_link_name', '')
+            
+            # 移除可能的前缀（如果存在）
+            # data_manager 可能使用了 'static_hand_' 前缀
+            if link_name.startswith('static_hand_'):
+                link_name = link_name[len('static_hand_'):]
+            
+            try:
+                link_idx = link_names.index(link_name)
+                new_anchor['hand_link_idx'] = link_idx
+                prepared_anchors.append(new_anchor)
+            except ValueError:
+                print(f"OptimizationThread: 警告: 未找到 link '{link_name}'")
+                continue
+        
+        return prepared_anchors
+
+    def _optimization_step(self, 
+                          anchors: list[dict], 
+                          current_pose: np.ndarray, 
+                          current_joints: dict[str, float]
+                          ) -> tuple[np.ndarray, dict[str, float]]:
+        """
+        执行一步优化（使用梯度下降和能量函数）
+        
+        Args:
+            anchors: 锚点对列表
+            current_pose: 当前基座位姿 (4x4 矩阵)
+            current_joints: 当前关节值字典
+            
+        Returns:
+            (new_pose, new_joints): 优化后的位姿和关节值
+        """
+        if not anchors or self.robot is None or self.optimizer is None:
+            return current_pose.copy(), current_joints.copy()
+        
+        # 1. 准备锚点数据（添加 link 索引）
+        prepared_anchors = self._prepare_anchor_data(anchors)
+        
+        if not prepared_anchors:
+            print("OptimizationThread: 没有有效的锚点，跳过优化")
+            return current_pose.copy(), current_joints.copy()
+        
+        # 2. 创建优化状态
+        joint_names = self.robot.joints.actuated_names
+        state = OptimizerState.from_numpy(
+            current_pose,
+            current_joints,
+            joint_names
+        )
+        
+        # 3. 定义损失函数
+        def loss_fn(opt_state):
+            return self.energy_function.compute(
+                opt_state,
+                self.robot,
+                anchor_pairs=prepared_anchors
+            )
+        
+        # 4. 执行一步优化
+        try:
+            new_state, loss_value = self.optimizer.step(state, loss_fn)
+            
+            # 可选：打印损失值用于调试
+            if hasattr(self, '_step_counter'):
+                self._step_counter += 1
+            else:
+                self._step_counter = 0
+            
+            if self._step_counter % 30 == 0:  # 每30步打印一次
+                # 获取详细能量
+                detailed_energies = self.energy_function.compute_detailed(
+                    new_state, self.robot, anchor_pairs=prepared_anchors
+                )
+                energy_str = ", ".join([f"{k}: {v:.4f}" for k, v in detailed_energies.items()])
+                print(f"OptimizationThread: Step {self._step_counter}, Total Loss: {loss_value:.4f} ({energy_str})")
+            
+            # 5. 转换回 NumPy 格式
+            new_pose = np.array(new_state.to_base_pose_matrix())
+            new_joints = new_state.to_joint_dict()
+            
             return new_pose, new_joints
             
-        # 1. 模拟关节优化
-        first_joint_name = self.robot.joints.actuated_names[0]
-        new_joints[first_joint_name] = np.sin(time.time() * 2) * 0.5 
-
-        # 2. 模拟位姿优化
-        hand_point_local = np.array(anchors[0]['hand_point'] + [1])
-        hand_point_world = (current_pose @ hand_point_local)[:3]
-        obj_point_world = np.array(anchors[0]['obj_point'])
-        error = obj_point_world - hand_point_world
-        translation_update = error * 0.05
-        new_pose[0:3, 3] += translation_update
-
-        return new_pose, new_joints
+        except Exception as e:
+            print(f"OptimizationThread: 优化步骤失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return current_pose.copy(), current_joints.copy()
 
     # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-    # ▲▲▲▲▲▲ [用户: 替换以上方法] ▲▲▲▲▲▲
+    # ▲▲▲▲▲▲ [真实优化实现结束] ▲▲▲▲▲▲
     # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
-    def _mock_forward_kinematics(self, 
-                                 base_pose: np.ndarray, 
-                                 joint_values: dict[str, float]
-                                 ) -> dict[str, np.ndarray]:
-        """
-        [占位符] 模拟正向运动学 (FK)。
-        
-        您的实现应该：
-        1. 接受基座位姿和关节值。
-        2. 遍历您的运动学链 (Kinematic Chain)。
-        3. 计算*每个* link 在世界坐标系中的 4x4 位姿矩阵。
-        4. 返回一个字典，其键必须是 '{prefix}{link_name}'。
-        
-        --- 模拟逻辑 ---
-        这个模拟只是将基座位姿赋予所有 links，
-        然后根据关节值给每个 link 一个小的 Z 轴旋转。
-        """
-        
-        link_poses_dict = {}
-        
-        if not self.link_names:
-            return {}
-            
-        # 1. 将基座位姿应用到所有 links
-        for link_name in self.link_names:
-            actor_name = self.actor_name_prefix + link_name
-            link_poses_dict[actor_name] = base_pose
-            
-        # 2. 模拟关节运动 (应用到对应的 link)
-        current_link_transform = base_pose
-        
-        # (这是一个非常简化的、不正确的链式FK，仅用于演示)
-        for i, (joint_name, joint_val) in enumerate(joint_values.items()):
-            
-            # 假设 joint 'i' 驱动 link 'i'
-            if i < len(self.link_names):
-                link_name = self.link_names[i]
-                actor_name = self.actor_name_prefix + link_name
-                
-                # 模拟：每个关节在Z轴上旋转，并在X轴上平移
-                joint_rot = _create_z_rotation(joint_val)
-                link_offset = _create_translation(0.1, 0, 0) # 假设 link 长度为 0.1
-                
-                # 链式变换
-                current_link_transform = current_link_transform @ link_offset @ joint_rot
-                
-                # 覆盖基座位姿
-                link_poses_dict[actor_name] = current_link_transform
-
-        return link_poses_dict
-
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-    # ▲▲▲▲▲▲ [用户: 替换以上方法] ▲▲▲▲▲▲
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
+    
     def _run_forward_kinematics(self, 
                                 base_pose_mat: np.ndarray, 
                                 joint_values_dict: dict[str, float]
@@ -417,7 +460,7 @@ class OptimizationThread(QThread):
                 T_world_link = T_world_base @ T_root_link
                 
                 # 转换为 4x4 矩阵以进行可视化
-                link_poses_dict[actor_name] = np.array(T_world_link.matrix())
+                link_poses_dict[actor_name] = np.array(T_world_link.as_matrix())
                 
             return link_poses_dict
             

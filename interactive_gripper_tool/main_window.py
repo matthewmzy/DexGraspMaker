@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
 
 from vista_widget import VistaWidget
-from controls_widget import ControlsWidget
+from controls_widget_v2 import ControlsWidget  # 使用新版 UI
 from data_manager import DataManager
 from optimization_thread import OptimizationThread
 
@@ -19,7 +19,7 @@ class MainWindow(QMainWindow):
     负责初始化所有UI组件和核心逻辑模块，并设置窗口布局。
     """
     
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, load_default: bool = False) -> None:
         super().__init__(parent)
         
         # 1. 初始化核心逻辑组件 (非UI)
@@ -38,6 +38,10 @@ class MainWindow(QMainWindow):
         # 4. 启动后端线程
         print("启动优化线程...")
         self.optimization_thread.start()
+        
+        # 5. 如果指定了 load_default，自动加载测试资源
+        if load_default:
+            self.load_default_assets()
 
     def init_core_components(self) -> None:
         """
@@ -120,10 +124,10 @@ class MainWindow(QMainWindow):
             lambda mesh_data: self.view_center.load_mesh(mesh_data, name="object", opacity=0.5) # 物体在中间半透明
         )
         self.data_manager.hand_loaded_signal.connect(
-            lambda links_dict: self.view_right.load_hand(links_dict) # 右侧，静态
+            lambda links_dict: self.view_right.load_hand(links_dict, name_prefix="static_hand_") # 右侧，静态（用于拾取）
         )
         self.data_manager.hand_loaded_signal.connect(
-            lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_") # 中间，动态
+            lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_") # 中间，动态（优化更新）
         )
         self.data_manager.hand_initial_pose_signal.connect(self.on_hand_initial_pose_received)
 
@@ -135,34 +139,50 @@ class MainWindow(QMainWindow):
         # --- 流程 1c: 将 JAX Robot 模型发送到后端 ---
         self.data_manager.pyroki_robot_loaded_signal.connect(self.optimization_thread.set_pyroki_robot)
 
-        # --- 流程 2: 锚点拾取 ---
-        # 控件 (按钮) -> 数据管理器 (切换状态)
-        self.controls_widget.start_picking_signal.connect(self.data_manager.set_picking_mode)
+        # --- 流程 2: 锚点拾取（新版工作流） ---
+        # 控件 (添加锚点对按钮) -> 数据管理器 (激活拾取)
+        self.controls_widget.add_anchor_pair_signal.connect(
+            lambda: self.data_manager.set_picking_mode(True)
+        )
 
         # 数据管理器 (状态改变) -> 3D 视窗 (启用/禁用拾取功能)
-        # (注意：我们使用了占位符中添加的 'picking_mode_changed_signal')
         self.data_manager.picking_mode_changed_signal.connect(self.on_picking_mode_changed)
 
         # 3D 视窗 (用户点击) -> 数据管理器 (记录坐标)
         self.view_left.point_picked_signal.connect(self.data_manager.on_object_point_picked)
         self.view_right.point_picked_signal.connect(self.data_manager.on_hand_point_picked)
+        
+        # 控件 (删除按钮) -> 数据管理器 (删除锚点对)
+        self.controls_widget.delete_anchor_signal.connect(self.data_manager.on_delete_anchor)
+        
+        # 控件 (启用/禁用复选框) -> 数据管理器 (切换锚点状态)
+        self.controls_widget.toggle_anchor_signal.connect(self.data_manager.on_toggle_anchor)
 
         # --- 流程 3: 触发优化 ---
         # 数据管理器 (凑成一对) -> 优化线程 (开始计算)
         self.data_manager.new_anchor_pair_signal.connect(self.optimization_thread.trigger_optimization)
 
         # --- 流程 4: 实时更新 ---
-        # 优化线程 (计算出新位姿) -> 中心视窗 (更新渲染)
-        self.optimization_thread.pose_update_signal.connect(self.view_center.update_hand_pose)
+        # 优化线程 (计算出新位姿) -> 主窗口 (更新渲染和锚点)
+        self.optimization_thread.pose_update_signal.connect(self.on_pose_update_with_anchors)
 
         # --- 流程 5: 可视化设置 ---
         # 控件 (滑块/颜色) -> 中心视窗 (更新渲染)
         self.controls_widget.visualization_settings_changed_signal.connect(self.on_visualization_changed)
+        
+        # 控件 (锚点大小/显示线) -> 主窗口 (重新渲染锚点)
+        self.controls_widget.visualization_settings_changed_signal.connect(
+            lambda settings: self.on_anchor_list_updated(self.data_manager.anchor_pairs)
+        )
 
         # --- 流程 6: 手动关节控制 ---
         # 控件 (滑块) -> 优化线程 (设置关节值并计算FK)
         # (优化线程将通过 pose_update_signal 发出新位姿)
         self.controls_widget.manual_joint_changed_signal.connect(self.optimization_thread.set_manual_joint)
+        
+        # --- 流程 7: 锚点可视化 ---
+        # 数据管理器 (锚点列表更新) -> 主窗口 (更新所有视窗的锚点显示)
+        self.data_manager.anchor_list_updated_signal.connect(self.on_anchor_list_updated)
         
         print("信号连接完成。")
 
@@ -208,12 +228,14 @@ class MainWindow(QMainWindow):
             
         print("MainWindow: 收到初始姿态，正在更新视窗...")
         
-        # 1. 更新右侧 (静态) 视窗
-        #    (poses_dict 的键是 'link_name', 这与 view_right 的 actor 名称匹配)
-        self.view_right.update_hand_pose(poses_dict)
+        # 1. 更新右侧 (静态) 视窗 - 添加 'static_hand_' 前缀
+        static_poses = {}
+        for link_name, pose_matrix in poses_dict.items():
+            actor_name = "static_hand_" + link_name
+            static_poses[actor_name] = pose_matrix
+        self.view_right.update_hand_pose(static_poses)
         
-        # 2. 更新中间 (动态) 视窗
-        #    (需要为 actor 名称添加 'dyn_hand_' 前缀)
+        # 2. 更新中间 (动态) 视窗 - 添加 'dyn_hand_' 前缀
         dyn_poses = {}
         for link_name, pose_matrix in poses_dict.items():
             actor_name = "dyn_hand_" + link_name
@@ -226,6 +248,134 @@ class MainWindow(QMainWindow):
         self.view_center.plotter.reset_camera()
         
         print("MainWindow: 视窗姿态已更新。")
+    
+    def on_anchor_list_updated(self, anchor_pairs: list) -> None:
+        """
+        当锚点列表更新时（添加或删除），更新所有视窗的锚点可视化
+        使用控件的颜色函数为每个锚点对分配不同颜色
+        
+        :param anchor_pairs: 锚点对列表
+        """
+        # 从控件获取可视化设置
+        color_func = self.controls_widget.get_anchor_color
+        show_lines = self.controls_widget.show_lines_checkbox.isChecked()
+        sphere_radius = self.controls_widget.anchor_size_spinbox.value() / 1000.0  # mm转m
+        
+        # 更新所有三个视窗的锚点显示，使用颜色函数
+        self.view_left.update_anchor_spheres(
+            anchor_pairs, 
+            color_func=color_func, 
+            show_lines=show_lines,
+            sphere_radius=sphere_radius
+        )
+        self.view_right.update_anchor_spheres(
+            anchor_pairs, 
+            color_func=color_func, 
+            show_lines=show_lines,
+            sphere_radius=sphere_radius
+        )
+        self.view_center.update_anchor_spheres(
+            anchor_pairs, 
+            color_func=color_func, 
+            show_lines=show_lines,
+            sphere_radius=sphere_radius
+        )
+    
+    def on_pose_update_with_anchors(self, link_poses_dict: dict) -> None:
+        """
+        当手部位姿更新时，同时更新锚点位置（因为手部锚点需要跟随手移动）
+        
+        性能优化：手部位姿每帧更新，锚点位置也每帧更新但使用快速方法（仅更新位置）
+        
+        :param link_poses_dict: {link_name: 4x4_matrix} 字典（来自优化线程，key是纯link名）
+        """
+        if not link_poses_dict:
+            print("MainWindow: on_pose_update_with_anchors 收到空字典！")
+            return
+        
+        # DEBUG: 每100帧打印一次，确认信号被接收
+        if not hasattr(self, '_pose_update_counter'):
+            self._pose_update_counter = 0
+        self._pose_update_counter += 1
+        if self._pose_update_counter % 100 == 0:
+            print(f"MainWindow: 已接收 {self._pose_update_counter} 次位姿更新，当前有 {len(link_poses_dict)} 个 links")
+        
+        # 首先更新手部位姿（每帧）
+        # 1. 中心视窗（动态手）- link_poses_dict 的 key 已经包含 'dyn_hand_' 前缀
+        # 注意：optimization_thread 的 _run_forward_kinematics 已经添加了前缀！
+        self.view_center.update_hand_pose(link_poses_dict)
+        
+        # 2. 快速更新锚点位置（每帧，但仅更新位置不重建actors）
+        anchor_pairs = self.data_manager.anchor_pairs
+        if not anchor_pairs:
+            return
+        
+        # 更新每个锚点对的手部点世界坐标
+        # 注意：我们需要从带前缀的 key 中提取纯 link_name
+        updated_pairs = []
+        for pair in anchor_pairs:
+            link_name = pair['hand_link_name']
+            hand_local = np.array(pair['hand_point_local'])
+            
+            # 查找对应 link 的当前世界位姿
+            # link_poses_dict 的 key 是 'dyn_hand_' + link_name
+            actor_name = "dyn_hand_" + link_name
+            if actor_name in link_poses_dict:
+                T_world_link = link_poses_dict[actor_name]
+                
+                # 将局部坐标转换为世界坐标
+                hand_local_homogeneous = np.append(hand_local, 1.0)
+                hand_world = (T_world_link @ hand_local_homogeneous)[:3]
+                
+                # 创建更新后的锚点对
+                updated_pair = pair.copy()
+                updated_pair['hand_point'] = hand_world.tolist()
+                updated_pairs.append(updated_pair)
+            else:
+                # 如果找不到对应的 link，保持原值
+                updated_pairs.append(pair)
+        
+        # 使用快速位置更新（不重建actors，性能更好）
+        self.view_left.update_anchor_positions_fast(updated_pairs)
+        self.view_right.update_anchor_positions_fast(updated_pairs)
+        self.view_center.update_anchor_positions_fast(updated_pairs)
+
+    def load_default_assets(self) -> None:
+        """
+        自动加载默认测试资源
+        """
+        import os
+        from PyQt6.QtCore import QTimer
+        
+        # 获取项目根目录（main_window.py 的上级目录）
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        
+        object_path = os.path.join(project_root, "test_assets", "Aligned.obj")
+        hand_path = os.path.join(project_root, "test_assets", "shadow_hand_right.urdf")
+        
+        print(f"自动加载默认资源...")
+        print(f"  物体: {object_path}")
+        print(f"  手部: {hand_path}")
+        
+        # 使用QTimer延迟加载，确保UI已完全初始化
+        def delayed_load():
+            if os.path.exists(object_path):
+                self.data_manager.load_object_from_file(object_path)
+                self.statusBar().showMessage(f"✓ 已自动加载物体: Aligned.obj")
+            else:
+                print(f"警告: 未找到物体文件: {object_path}")
+                self.statusBar().showMessage(f"✗ 未找到物体文件: {object_path}")
+            
+            if os.path.exists(hand_path):
+                self.data_manager.load_hand_from_file(hand_path)
+                self.statusBar().showMessage(f"✓ 已自动加载手部: shadow_hand_right.urdf")
+            else:
+                print(f"警告: 未找到手部文件: {hand_path}")
+                self.statusBar().showMessage(f"✗ 未找到手部文件: {hand_path}")
+        
+        # 延迟500ms后加载，确保窗口已显示
+        QTimer.singleShot(500, delayed_load)
 
     def closeEvent(self, event) -> None:
         """

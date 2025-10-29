@@ -1,6 +1,23 @@
 # DexGraspMaker
 
-项目文件结构（前端部分）
+## Quick Start
+
+### Method 1: Using the launcher script (Recommended)
+```bash
+./run.sh
+```
+
+### Method 2: Using Python directly (after activating conda environment)
+```bash
+conda activate dgm
+python interactive_gripper_tool/main.py
+```
+
+The conda environment is now configured to automatically set the required OpenGL environment variables when activated.
+
+---
+
+## 项目文件结构（前端部分）
 
 ```text
 interactive_gripper_tool/
