@@ -37,6 +37,7 @@ def main():
 
     except Exception as e:
         print(f"启动应用程序时发生严重错误: {e}")
+        raise
         # 在这里可以添加一个QMessageBox来显示错误
         sys.exit(1)
 

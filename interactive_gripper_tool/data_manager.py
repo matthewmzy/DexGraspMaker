@@ -349,12 +349,12 @@ class DataManager(QObject):
 
         self._temp_hand_anchor = {
             'world_coord': pick_data['world_coord'],
-            'local_coord': pick_data.get('local_coord', pick_data['world_coord']),
+            'local_coord': pick_data.get('relative_coord', pick_data['world_coord']),
             'link_name': link_name
         }
-        self._current_pick_stage = 'object'
+        # self._current_pick_stage = 'object'  # 移除，允许多次选择手部点
         print(f"DataManager: 已拾取手部点: link={link_name}, 局部坐标={self._temp_hand_anchor['local_coord']}")
-        self.status_message_signal.emit(f"✓ 手部点已选定 ({link_name})。请在 [左侧] 视窗点击物体对应点。")
+        self.status_message_signal.emit(f"✓ 手部点已选定 ({link_name})。可重新选择或在 [左侧] 视窗点击物体对应点。")
 
     @pyqtSlot(dict)
     def on_object_point_picked(self, pick_data: dict) -> None:
@@ -364,7 +364,7 @@ class DataManager(QObject):
         改进：添加锚点对后立即触发优化，但保持拾取模式开启，
         方便用户连续添加多个锚点对
         """
-        if not (self.is_picking_mode and self._current_pick_stage == 'object'):
+        if not self.is_picking_mode or self._temp_hand_anchor is None:
             return
             
         # 1. 创建锚点对
@@ -373,7 +373,7 @@ class DataManager(QObject):
             'hand_point_local': self._temp_hand_anchor['local_coord'],
             'hand_link_name': self._temp_hand_anchor['link_name'],
             'obj_point': pick_data['world_coord'],
-            'obj_point_local': pick_data.get('local_coord', pick_data['world_coord']),
+            'obj_point_local': pick_data.get('relative_coord', pick_data['world_coord']),
             'enabled': True  # 新增：默认启用
         }
         
@@ -381,8 +381,7 @@ class DataManager(QObject):
         self.anchor_pairs.append(new_pair)
         print(f"DataManager: 已创建新锚点对 #{len(self.anchor_pairs)}: {new_pair}")
         
-        # 3. 重置状态机到 'hand'，准备下一次拾取（保持拾取模式开启）
-        self._current_pick_stage = 'hand'
+        # 3. 重置状态机，准备下一次拾取（保持拾取模式开启）
         self._temp_hand_anchor = None
         
         # 4. 立即发射信号触发优化

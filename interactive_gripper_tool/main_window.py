@@ -251,35 +251,41 @@ class MainWindow(QMainWindow):
     
     def on_anchor_list_updated(self, anchor_pairs: list) -> None:
         """
-        当锚点列表更新时（添加或删除），更新所有视窗的锚点可视化
-        使用控件的颜色函数为每个锚点对分配不同颜色
-        
+        当锚点列表更新时，更新所有视窗的锚点显示。
         :param anchor_pairs: 锚点对列表
         """
-        # 从控件获取可视化设置
-        color_func = self.controls_widget.get_anchor_color
-        show_lines = self.controls_widget.show_lines_checkbox.isChecked()
+        if not anchor_pairs:
+            # 如果没有锚点，清空显示
+            self.view_left.update_anchor_spheres([], lambda p: 'red', 0.005)
+            self.view_right.update_anchor_spheres([], lambda p: 'red', 0.005)
+            self.view_center.update_anchor_spheres([], lambda p: 'red', 0.005)
+            return
+        
+        color_func = lambda pair: self.get_color_for_pair(anchor_pairs.index(pair))
         sphere_radius = self.controls_widget.anchor_size_spinbox.value() / 1000.0  # mm转m
         
-        # 更新所有三个视窗的锚点显示，使用颜色函数
         self.view_left.update_anchor_spheres(
             anchor_pairs, 
-            color_func=color_func, 
-            show_lines=show_lines,
-            sphere_radius=sphere_radius
+            color_func, 
+            sphere_radius
         )
         self.view_right.update_anchor_spheres(
             anchor_pairs, 
-            color_func=color_func, 
-            show_lines=show_lines,
-            sphere_radius=sphere_radius
+            color_func, 
+            sphere_radius
         )
         self.view_center.update_anchor_spheres(
             anchor_pairs, 
-            color_func=color_func, 
-            show_lines=show_lines,
-            sphere_radius=sphere_radius
+            color_func, 
+            sphere_radius
         )
+
+    def get_color_for_pair(self, index: int) -> str:
+        """
+        根据锚点对索引返回颜色。
+        """
+        colors = ['red', 'blue', 'green', 'yellow', 'cyan', 'magenta', 'orange', 'purple', 'pink', 'brown']
+        return colors[index % len(colors)]
     
     def on_pose_update_with_anchors(self, link_poses_dict: dict) -> None:
         """
