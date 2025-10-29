@@ -68,7 +68,7 @@ class KeyboardController(QObject):
 
     def toggle_control(self, anchor_index: int, point_type: str, current_position: np.ndarray) -> bool:
         """
-        切换控制状态：如果正在控制则结束，否则开始控制
+        切换控制状态：如果正在控制指定的锚点则结束，否则先停止当前所有控制然后开始新控制
         
         :param anchor_index: 锚点对索引
         :param point_type: 点类型 ("hand" 或 "object")
@@ -76,9 +76,13 @@ class KeyboardController(QObject):
         :return: True 如果开始控制，False 如果结束控制
         """
         if self.is_controlling(anchor_index, point_type):
+            # 如果正在控制指定的锚点，结束控制
             self.end_control()
             return False  # 结束控制
         else:
+            # 如果没有控制指定的锚点，先停止任何当前的控制，然后开始新控制
+            if self.is_active:
+                self.end_control()
             self.start_control(anchor_index, point_type, current_position)
             return True   # 开始控制
 
