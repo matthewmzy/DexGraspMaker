@@ -214,6 +214,10 @@ class VistaWidget(QWidget):
             print(f"VistaWidget: 警告: 未找到匹配 '{name or name_pattern}' 的 actor。")
             return
             
+        # 暂时抑制渲染以提高性能
+        original_suppress = self.plotter.suppress_rendering
+        self.plotter.suppress_rendering = True
+        
         # 应用属性
         for actor in actors_to_modify:
             if 'opacity' in kwargs:
@@ -222,6 +226,11 @@ class VistaWidget(QWidget):
                 actor.prop.color = kwargs['color']
             if 'visibility' in kwargs:
                 actor.prop.visibility = kwargs['visibility']
+        
+        # 恢复渲染状态并手动渲染一次
+        self.plotter.suppress_rendering = original_suppress
+        if not original_suppress:
+            self.plotter.render()
                 
         print(f"VistaWidget: 已更新 {len(actors_to_modify)} 个 actors 的属性。")
 
@@ -246,26 +255,32 @@ class VistaWidget(QWidget):
         
         for i, pair in enumerate(anchor_pairs):
             obj_point = pair['obj_point']
-            hand_point = pair.get('hand_point', obj_point)
+            hand_point = pair.get('hand_point', pair.get('obj_point', [0, 0, 0]))
             color = color_func(i)
             
-            obj_actor = self.plotter.add_mesh(
-                pyvista.Sphere(radius=sphere_radius, center=(0, 0, 0)),
-                color=color,
-                name=f"anchor_obj_{i}"
-            )
-            obj_translation = np.eye(4)
-            obj_translation[:3, 3] = obj_point
-            obj_actor.user_matrix = obj_translation
+            # 创建物体球体（如果位置不是原点）
+            obj_actor = None
+            if not np.allclose(obj_point, [0, 0, 0], atol=1e-6):
+                obj_actor = self.plotter.add_mesh(
+                    pyvista.Sphere(radius=sphere_radius, center=(0, 0, 0)),
+                    color=color,
+                    name=f"anchor_obj_{i}"
+                )
+                obj_translation = np.eye(4)
+                obj_translation[:3, 3] = obj_point
+                obj_actor.user_matrix = obj_translation
             
-            hand_actor = self.plotter.add_mesh(
-                pyvista.Sphere(radius=sphere_radius, center=(0, 0, 0)),
-                color=color,
-                name=f"anchor_hand_{i}"
-            )
-            hand_translation = np.eye(4)
-            hand_translation[:3, 3] = hand_point
-            hand_actor.user_matrix = hand_translation
+            # 创建手部球体（如果位置不是原点）
+            hand_actor = None
+            if not np.allclose(hand_point, [0, 0, 0], atol=1e-6):
+                hand_actor = self.plotter.add_mesh(
+                    pyvista.Sphere(radius=sphere_radius, center=(0, 0, 0)),
+                    color=color,
+                    name=f"anchor_hand_{i}"
+                )
+                hand_translation = np.eye(4)
+                hand_translation[:3, 3] = hand_point
+                hand_actor.user_matrix = hand_translation
             
             self.anchor_actors.append({
                 'obj_actor': obj_actor,
@@ -275,6 +290,43 @@ class VistaWidget(QWidget):
             })
         
         print(f"VistaWidget: 已更新 {len(anchor_pairs)} 个锚点对的球体显示。")
+
+    def add_temp_anchor(self, point: list, color_rgb: tuple, is_hand: bool = True) -> None:
+        """
+        添加单个临时锚点球体，不清除现有的锚点
+        
+        :param point: 锚点位置 [x, y, z]
+        :param color_rgb: 颜色 (r, g, b) 0-1范围
+        :param is_hand: True为手部锚点，False为物体锚点
+        """
+        name_suffix = "hand" if is_hand else "obj"
+        actor_name = f"temp_anchor_{name_suffix}"
+        
+        # 移除现有的临时锚点（如果有）
+        if actor_name in [actor.GetObjectName() for actor in self.plotter.actors.values()]:
+            self.plotter.remove_actor(actor_name)
+        
+        # 创建新的临时锚点
+        actor = self.plotter.add_mesh(
+            pyvista.Sphere(radius=0.008, center=(0, 0, 0)),
+            color=color_rgb,
+            name=actor_name
+        )
+        translation = np.eye(4)
+        translation[:3, 3] = point
+        actor.user_matrix = translation
+
+    def clear_temp_anchors(self) -> None:
+        """
+        清除所有临时锚点球体
+        """
+        actors_to_remove = []
+        for name, actor in self.plotter.actors.items():
+            if name.startswith("temp_anchor_"):
+                actors_to_remove.append(name)
+        
+        for name in actors_to_remove:
+            self.plotter.remove_actor(name)
 
     def update_anchor_positions_fast(self, updated_pairs: list) -> None:
         """
@@ -295,20 +347,22 @@ class VistaWidget(QWidget):
             color = self.color_func(i)
             
             # 更新手部锚点位置
-            hand_translation = np.eye(4)
-            hand_translation[:3, 3] = hand_point
-            actors['hand_actor'].user_matrix = hand_translation
+            if actors['hand_actor'] is not None:
+                hand_translation = np.eye(4)
+                hand_translation[:3, 3] = hand_point
+                actors['hand_actor'].user_matrix = hand_translation
             
             # 更新物体锚点位置
-            if 'obj_actor' in actors:
+            if actors['obj_actor'] is not None:
                 obj_translation = np.eye(4)
                 obj_translation[:3, 3] = obj_point
                 actors['obj_actor'].user_matrix = obj_translation
             
             # 更新颜色如果改变
             if actors['color'] != color:
-                actors['hand_actor'].prop.color = color
-                if 'obj_actor' in actors:
+                if actors['hand_actor'] is not None:
+                    actors['hand_actor'].prop.color = color
+                if actors['obj_actor'] is not None:
                     actors['obj_actor'].prop.color = color
                 actors['color'] = color
             

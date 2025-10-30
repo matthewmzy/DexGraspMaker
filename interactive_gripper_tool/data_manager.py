@@ -45,6 +45,12 @@ class DataManager(QObject):
     # 信号 4.5: 锚点对准备状态改变（控制确定按钮显示）
     anchor_pair_ready_signal = pyqtSignal(bool)
     
+    # 信号 4.6: 清空临时锚点球体
+    clear_temp_anchors_signal = pyqtSignal()
+    
+    # 信号 4.7: 显示临时锚点
+    show_temp_anchor_signal = pyqtSignal(dict)  # {'type': 'hand'/'object', 'point': [x,y,z], 'link_name': str}
+    
     # 信号 5: （可选）状态栏消息
     status_message_signal = pyqtSignal(str) # (用于提示用户)
 
@@ -336,7 +342,6 @@ class DataManager(QObject):
         用户可以连续添加多个锚点对
         """
         self.is_picking_mode = is_active
-        self._current_pick_stage = 'hand' # 每次都重置为先选 'hand'
         self._temp_hand_anchor = None
         self._temp_object_anchor = None
         
@@ -344,7 +349,7 @@ class DataManager(QObject):
         self.anchor_pair_ready_signal.emit(False)  # 隐藏确定按钮
         
         if is_active:
-            self.status_message_signal.emit("拾取模式已激活：请在 [右侧] 视窗点击机械手上的一个点。")
+            self.status_message_signal.emit("拾取模式已激活：请在任意视窗点击选择点（手或物体均可）。")
         else:
             self.status_message_signal.emit("拾取模式已关闭。")
 
@@ -353,7 +358,7 @@ class DataManager(QObject):
         """
         当在右侧视窗（手部）点击时调用
         """
-        if not (self.is_picking_mode and self._current_pick_stage == 'hand'):
+        if not self.is_picking_mode:
             return
         
         actor_name = pick_data['actor_name']
@@ -377,15 +382,17 @@ class DataManager(QObject):
             'local_coord': pick_data.get('relative_coord', pick_data['world_coord']),
             'link_name': link_name
         }
-        # self._current_pick_stage = 'object'  # 移除，允许多次选择手部点
         print(f"DataManager: 已拾取手部点: link={link_name}, 局部坐标={self._temp_hand_anchor['local_coord']}")
         
+        # 显示临时锚点
+        self.show_temp_anchor_signal.emit({
+            'type': 'hand',
+            'point': self._temp_hand_anchor['world_coord'],
+            'link_name': link_name
+        })
+        
         # 检查是否可以显示确定按钮
-        if self._temp_object_anchor is not None:
-            self.anchor_pair_ready_signal.emit(True)
-            self.status_message_signal.emit(f"✓ 两个点都已选定！点击「确定」按钮添加锚点对。")
-        else:
-            self.status_message_signal.emit(f"✓ 手部点已选定 ({link_name})。现在在 [左侧] 视窗点击物体对应点。")
+        self._check_anchor_pair_ready()
 
     @pyqtSlot(dict)
     def on_object_point_picked(self, pick_data: dict) -> None:
@@ -394,7 +401,7 @@ class DataManager(QObject):
         
         改进：只存储物体点，等待用户确认后再创建锚点对
         """
-        if not self.is_picking_mode or self._temp_hand_anchor is None:
+        if not self.is_picking_mode:
             return
             
         # 1. 存储物体点
@@ -405,9 +412,28 @@ class DataManager(QObject):
         
         print(f"DataManager: 已拾取物体点: 世界坐标={self._temp_object_anchor['world_coord']}")
         
-        # 2. 显示确定按钮
-        self.anchor_pair_ready_signal.emit(True)
-        self.status_message_signal.emit(f"✓ 两个点都已选定！点击「确定」按钮添加锚点对。")
+        # 显示临时锚点
+        self.show_temp_anchor_signal.emit({
+            'type': 'object',
+            'point': self._temp_object_anchor['world_coord']
+        })
+        
+        # 2. 检查是否可以显示确定按钮
+        self._check_anchor_pair_ready()
+    
+    def _check_anchor_pair_ready(self) -> None:
+        """
+        检查锚点对是否准备好，更新UI状态
+        """
+        if self._temp_hand_anchor is not None and self._temp_object_anchor is not None:
+            self.anchor_pair_ready_signal.emit(True)
+            self.status_message_signal.emit("✓ 两个点都已选定！点击「确定」按钮添加锚点对，或继续选择其他点覆盖当前选择。")
+        elif self._temp_hand_anchor is not None:
+            self.status_message_signal.emit(f"✓ 手部点已选定 ({self._temp_hand_anchor['link_name']})。请在任意视窗选择物体对应点。")
+        elif self._temp_object_anchor is not None:
+            self.status_message_signal.emit("✓ 物体点已选定。请在任意视窗选择手部对应点。")
+        else:
+            self.status_message_signal.emit("请在任意视窗点击选择第一个点（手或物体均可）。")
 
     @pyqtSlot()
     def confirm_anchor_pair(self) -> None:
@@ -439,13 +465,40 @@ class DataManager(QObject):
         # 4. 隐藏确定按钮
         self.anchor_pair_ready_signal.emit(False)
         
-        # 5. 发射信号触发优化
+        # 5. 清除临时锚点显示
+        self.clear_temp_anchors_signal.emit()
+        
+        # 6. 发射信号触发优化
         self.new_anchor_pair_signal.emit(self.anchor_pairs)
         self.anchor_list_updated_signal.emit(self.anchor_pairs)
         self.picking_mode_changed_signal.emit(False)
         
         # 6. 提示用户
         self.status_message_signal.emit(f"✓ 锚点对 #{len(self.anchor_pairs)} 已添加！优化已开始。")
+
+    @pyqtSlot()
+    def cancel_anchor_adding(self) -> None:
+        """
+        取消添加锚点对
+        """
+        if not self.is_picking_mode:
+            return
+            
+        # 1. 清空临时状态
+        self._temp_hand_anchor = None
+        self._temp_object_anchor = None
+        self.is_picking_mode = False
+        
+        # 2. 隐藏确定按钮
+        self.anchor_pair_ready_signal.emit(False)
+        
+        # 3. 发射信号关闭拾取模式
+        self.picking_mode_changed_signal.emit(False)
+        
+        # 4. 清空所有视窗的锚点球体
+        self.clear_temp_anchors_signal.emit()
+        
+        self.status_message_signal.emit("已取消添加锚点对。")
 
     @pyqtSlot(int)
     def on_delete_anchor(self, row_index: int) -> None:

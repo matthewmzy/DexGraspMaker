@@ -32,6 +32,7 @@ class ControlsWidget(QWidget):
     # 流程 2: 锚点管理（新设计）
     add_anchor_pair_signal = pyqtSignal()  # 开始添加新锚点对
     confirm_anchor_pair_signal = pyqtSignal()  # 确认添加锚点对
+    cancel_anchor_adding_signal = pyqtSignal()  # 取消添加锚点对
     delete_anchor_signal = pyqtSignal(int)  # 删除指定索引的锚点对
     toggle_anchor_signal = pyqtSignal(int, bool)  # 启用/禁用锚点对
     
@@ -78,6 +79,9 @@ class ControlsWidget(QWidget):
         
         # 存储锚点调整按钮的引用，用于状态更新
         self.anchor_adjust_buttons = {}  # {(anchor_index, point_type): button}
+        
+        # 添加锚点状态
+        self.is_adding_anchor = False
         
         # 主布局
         main_layout = QVBoxLayout(self)
@@ -191,9 +195,10 @@ class ControlsWidget(QWidget):
         # 说明
         instruction_label = QLabel(
             "🎯 点击「添加新锚点对」，然后：\n"
-            "   1️⃣ 在右侧视窗点击手部位置\n"
-            "   2️⃣ 在左侧视窗点击物体对应位置\n"
+            "   1️⃣ 在任意视窗点击选择第一个点（手或物体）\n"
+            "   2️⃣ 在任意视窗点击选择第二个点\n"
             "   3️⃣ 点击「确定」按钮完成添加\n"
+            "   ❌ 或点击变红的按钮取消选择\n"
             "   ✨ 然后可以继续添加更多锚点对！"
         )
         instruction_label.setStyleSheet("QLabel { background-color: #fffacd; padding: 8px; border-radius: 5px; }")
@@ -234,7 +239,7 @@ class ControlsWidget(QWidget):
         main_layout.setStretchFactor(right_widget, 2)
         
         # 连接信号
-        self.add_anchor_button.clicked.connect(self.add_anchor_pair_signal.emit)
+        self.add_anchor_button.clicked.connect(self._on_add_anchor_button_clicked)
         self.confirm_anchor_button.clicked.connect(self.confirm_anchor_pair_signal.emit)
         self.delete_anchor_button.clicked.connect(self._on_delete_anchor)
         self.clear_all_button.clicked.connect(self._on_clear_all_anchors)
@@ -646,6 +651,63 @@ class ControlsWidget(QWidget):
         :param show: True 显示，False 隐藏
         """
         self.confirm_anchor_button.setVisible(show)
+    
+    def _on_add_anchor_button_clicked(self) -> None:
+        """
+        添加锚点对按钮点击处理
+        """
+        if self.is_adding_anchor:
+            # 正在添加状态，点击取消
+            self._cancel_adding_anchor()
+        else:
+            # 开始添加状态
+            self._start_adding_anchor()
+    
+    def _start_adding_anchor(self) -> None:
+        """
+        开始添加锚点对
+        """
+        self.is_adding_anchor = True
+        self.add_anchor_button.setText("❌ 取消添加")
+        self.add_anchor_button.setStyleSheet(
+            "QPushButton { "
+            "background-color: #f44336; "
+            "color: white; "
+            "font-size: 16px; "
+            "font-weight: bold; "
+            "border-radius: 8px; "
+            "} "
+            "QPushButton:hover { background-color: #d32f2f; } "
+            "QPushButton:pressed { background-color: #b71c1c; }"
+        )
+        self.add_anchor_pair_signal.emit()
+    
+    def _cancel_adding_anchor(self) -> None:
+        """
+        取消添加锚点对
+        """
+        self.is_adding_anchor = False
+        self.add_anchor_button.setText("➕ 添加新锚点对")
+        self.add_anchor_button.setStyleSheet(
+            "QPushButton { "
+            "background-color: #4CAF50; "
+            "color: white; "
+            "font-size: 16px; "
+            "font-weight: bold; "
+            "border-radius: 8px; "
+            "} "
+            "QPushButton:hover { background-color: #45a049; } "
+            "QPushButton:pressed { background-color: #3d8b40; }"
+        )
+        # 发送取消信号
+        self.cancel_anchor_adding_signal.emit()
+    
+    def reset_anchor_button_state(self) -> None:
+        """
+        重置添加锚点按钮状态（在成功添加后调用）
+        """
+        if self.is_adding_anchor:
+            self._cancel_adding_anchor()
     
     # 向后兼容：create_joint_controls 是 populate_joint_controls 的别名
     create_joint_controls = populate_joint_controls

@@ -151,12 +151,23 @@ class MainWindow(QMainWindow):
         self.controls_widget.confirm_anchor_pair_signal.connect(
             self.data_manager.confirm_anchor_pair
         )
+        
+        # 控件 (取消按钮) -> 数据管理器 (取消添加锚点对)
+        self.controls_widget.cancel_anchor_adding_signal.connect(
+            self.data_manager.cancel_anchor_adding
+        )
 
         # 数据管理器 (状态改变) -> 3D 视窗 (启用/禁用拾取功能)
         self.data_manager.picking_mode_changed_signal.connect(self.on_picking_mode_changed)
         
         # 数据管理器 (锚点对准备状态) -> 控件 (显示/隐藏确定按钮)
         self.data_manager.anchor_pair_ready_signal.connect(self.controls_widget.show_confirm_button)
+        
+        # 数据管理器 (清空临时锚点) -> 3D 视窗 (清空球体)
+        self.data_manager.clear_temp_anchors_signal.connect(self._clear_temp_anchors)
+        
+        # 数据管理器 (显示临时锚点) -> 3D 视窗 (显示临时球体)
+        self.data_manager.show_temp_anchor_signal.connect(self._show_temp_anchor)
 
         # 3D 视窗 (用户点击) -> 数据管理器 (记录坐标)
         self.view_left.point_picked_signal.connect(self.data_manager.on_object_point_picked)
@@ -245,6 +256,40 @@ class MainWindow(QMainWindow):
             # 清除临时拾取标记
             self.view_left.plotter.remove_actor(f"_pick_marker_{self.view_left.objectName()}")
             self.view_right.plotter.remove_actor(f"_pick_marker_{self.view_right.objectName()}")
+            # 重置按钮状态
+            self.controls_widget.reset_anchor_button_state()
+
+    def _clear_temp_anchors(self) -> None:
+        """
+        清空所有视窗的临时锚点球体
+        """
+        self.view_left.clear_temp_anchors()
+        self.view_right.clear_temp_anchors()
+        self.view_center.clear_temp_anchors()
+    
+    def _show_temp_anchor(self, anchor_data: dict) -> None:
+        """
+        显示临时锚点球体
+        """
+        # 获取下一个锚点对的颜色
+        next_index = len(self.data_manager.anchor_pairs)
+        color_rgb = self.controls_widget.get_anchor_color(next_index)
+        
+        # 先清除所有临时锚点
+        self._clear_temp_anchors()
+        
+        # 显示所有已选择的临时锚点
+        if self.data_manager._temp_hand_anchor:
+            point = self.data_manager._temp_hand_anchor['world_coord']
+            self.view_left.add_temp_anchor(point, color_rgb, True)
+            self.view_right.add_temp_anchor(point, color_rgb, True)
+            self.view_center.add_temp_anchor(point, color_rgb, True)
+        
+        if self.data_manager._temp_object_anchor:
+            point = self.data_manager._temp_object_anchor['world_coord']
+            self.view_left.add_temp_anchor(point, color_rgb, False)
+            self.view_right.add_temp_anchor(point, color_rgb, False)
+            self.view_center.add_temp_anchor(point, color_rgb, False)
 
     def on_visualization_changed(self, settings: dict) -> None:
         """
@@ -256,7 +301,7 @@ class MainWindow(QMainWindow):
         if 'hand_opacity' in settings:
             # 假设 vista_widget.set_actor_properties 支持通配符
             self.view_center.set_actor_properties(
-                name_pattern="dyn_hand_*", 
+                name_pattern="dyn_hand_", 
                 opacity=settings['hand_opacity']
             )
         
@@ -306,6 +351,8 @@ class MainWindow(QMainWindow):
         当锚点列表更新时，更新所有视窗的锚点显示。
         :param anchor_pairs: 锚点对列表
         """
+        print(f"DEBUG: on_anchor_list_updated called with {len(anchor_pairs)} pairs")
+        
         if not anchor_pairs:
             # 如果没有锚点，清空显示
             self.view_left.update_anchor_spheres([], lambda p: 'red', 0.005)
@@ -316,18 +363,38 @@ class MainWindow(QMainWindow):
         color_func = lambda i: self.get_color_for_pair(i)
         sphere_radius = self.controls_widget.anchor_size_spinbox.value() / 1000.0  # mm转m
         
+        # 为不同视图准备锚点对
+        # view_left: 显示手锚点和物体锚点（静态位置）
+        left_pairs = anchor_pairs.copy()
+        
+        # view_right: 只显示手锚点（静态位置）
+        right_pairs = []
+        for pair in anchor_pairs:
+            right_pairs.append({
+                'hand_point': pair['hand_point'],
+                'hand_point_local': pair['hand_point_local'],
+                'hand_link_name': pair['hand_link_name'],
+                'obj_point': [0, 0, 0],  # 设置为原点，这样就不会显示
+                'obj_point_local': pair.get('obj_point_local'),
+                'enabled': pair['enabled']
+            })
+            print(f"DEBUG: right_pairs hand_point: {pair['hand_point']}")
+        
+        # view_center: 显示手锚点和物体锚点（静态位置）
+        center_pairs = anchor_pairs.copy()
+        
         self.view_left.update_anchor_spheres(
-            anchor_pairs, 
+            left_pairs, 
             color_func, 
             sphere_radius
         )
         self.view_right.update_anchor_spheres(
-            anchor_pairs, 
+            right_pairs, 
             color_func, 
             sphere_radius
         )
         self.view_center.update_anchor_spheres(
-            anchor_pairs, 
+            center_pairs, 
             color_func, 
             sphere_radius
         )
@@ -400,36 +467,40 @@ class MainWindow(QMainWindow):
                 # 如果找不到对应的 link，保持原值
                 dynamic_updated_pairs.append(pair)
         
-        # 为静态视图（view_left, view_right）计算锚点位置 - 使用初始姿态
-        static_updated_pairs = []
-        if hasattr(self, '_initial_link_poses') and self._initial_link_poses:
-            for pair in anchor_pairs:
-                link_name = pair['hand_link_name']
-                hand_local = np.array(pair['hand_point_local'])
+        # 为不同视图计算锚点位置
+        # view_left（左侧物体视图）：使用当前动态姿态的手部锚点 + 物体锚点
+        left_updated_pairs = []
+        for pair in anchor_pairs:
+            link_name = pair['hand_link_name']
+            hand_local = np.array(pair['hand_point_local'])
+            
+            # 创建更新后的锚点对
+            updated_pair = pair.copy()
+            
+            # 处理手部锚点：使用当前动态姿态计算位置
+            actor_name = "dyn_hand_" + link_name
+            if actor_name in link_poses_dict:
+                T_world_link = link_poses_dict[actor_name]
                 
-                # 创建更新后的锚点对
-                updated_pair = pair.copy()
+                # 将局部坐标转换为世界坐标
+                hand_local_homogeneous = np.append(hand_local, 1.0)
+                hand_world = (T_world_link @ hand_local_homogeneous)[:3]
                 
-                # 处理手部锚点：使用初始link姿态计算位置
-                if link_name in self._initial_link_poses:
-                    T_world_link = self._initial_link_poses[link_name]
-                    
-                    # 将局部坐标转换为世界坐标
-                    hand_local_homogeneous = np.append(hand_local, 1.0)
-                    hand_world = (T_world_link @ hand_local_homogeneous)[:3]
-                    
-                    updated_pair['hand_point'] = hand_world.tolist()
-                else:
-                    # 如果找不到对应的 link，保持原值
-                    pass
-                
-                # 物体锚点直接使用世界坐标（物体在世界坐标系中）
-                # obj_point已经是世界坐标，无需转换
-                
-                static_updated_pairs.append(updated_pair)
-        else:
-            # 如果没有初始姿态，使用动态姿态作为fallback
-            static_updated_pairs = dynamic_updated_pairs.copy()
+                updated_pair['hand_point'] = hand_world.tolist()
+            
+            left_updated_pairs.append(updated_pair)
+        
+        # view_right（右侧手视图）：只显示手部锚点，使用静态位置（不跟随手移动）
+        right_updated_pairs = []
+        for pair in anchor_pairs:
+            # 创建只包含手部锚点的pair，使用原始静态位置
+            updated_pair = pair.copy()
+            # 不更新hand_point，保持创建时的静态位置
+            # 隐藏物体锚点（设为原点）
+            updated_pair['obj_point'] = [0, 0, 0]
+            print(f"DEBUG: on_pose_update right_updated_pairs hand_point: {updated_pair['hand_point']}")
+            
+            right_updated_pairs.append(updated_pair)
         
         # 使用快速位置更新（不重建actors，性能更好）
         color_func = lambda i: self.get_color_for_pair(i)
@@ -437,11 +508,9 @@ class MainWindow(QMainWindow):
         self.view_right.color_func = color_func
         self.view_center.color_func = color_func
         
-        # 静态视图使用初始姿态计算的锚点位置
-        self.view_left.update_anchor_positions_fast(static_updated_pairs)
-        self.view_right.update_anchor_positions_fast(static_updated_pairs)
-        
-        # 动态视图使用当前姿态计算的锚点位置
+        # 更新各视图的锚点位置
+        self.view_left.update_anchor_positions_fast(left_updated_pairs)
+        self.view_right.update_anchor_positions_fast(right_updated_pairs)
         self.view_center.update_anchor_positions_fast(dynamic_updated_pairs)
         
         # 更新手姿态显示
@@ -490,6 +559,8 @@ class MainWindow(QMainWindow):
         
         :param anchor_index: 锚点对索引
         """
+        print(f"DEBUG: on_start_adjust_hand_anchor called for anchor {anchor_index}")
+        
         if 0 <= anchor_index < len(self.data_manager.anchor_pairs):
             anchor = self.data_manager.anchor_pairs[anchor_index]
             # 使用局部坐标进行键盘控制，因为用户想要相对于手移动
