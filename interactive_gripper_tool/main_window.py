@@ -490,16 +490,23 @@ class MainWindow(QMainWindow):
             
             left_updated_pairs.append(updated_pair)
         
-        # view_right（右侧手视图）：只显示手部锚点，使用静态位置（不跟随手移动）
+        # view_right（右侧手视图）：保持手部静态姿态，只显示手部锚点
         right_updated_pairs = []
         for pair in anchor_pairs:
-            # 创建只包含手部锚点的pair，使用原始静态位置
             updated_pair = pair.copy()
-            # 不更新hand_point，保持创建时的静态位置
-            # 隐藏物体锚点（设为原点）
             updated_pair['obj_point'] = [0, 0, 0]
-            print(f"DEBUG: on_pose_update right_updated_pairs hand_point: {updated_pair['hand_point']}")
-            
+
+            link_name = pair['hand_link_name']
+            hand_local = np.array(pair['hand_point_local'])
+            static_world = np.array(updated_pair['hand_point'])
+
+            # 使用初始姿态把局部坐标变换到静态世界坐标
+            if hasattr(self, "_initial_link_poses") and link_name in self._initial_link_poses:
+                T_world_link_static = self._initial_link_poses[link_name]
+                hand_local_h = np.append(hand_local, 1.0)
+                static_world = (T_world_link_static @ hand_local_h)[:3]
+
+            updated_pair['hand_point'] = static_world.tolist()
             right_updated_pairs.append(updated_pair)
         
         # 使用快速位置更新（不重建actors，性能更好）
