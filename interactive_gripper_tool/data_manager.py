@@ -1,6 +1,8 @@
 # data_manager.py
 
 import sys
+import os
+import json
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QUrl
 from PyQt6.QtWidgets import QFileDialog
@@ -13,6 +15,9 @@ import pyvista
 import trimesh
 import yourdfpy
 import pyroki as pk
+
+# 导入球体拟合模块
+from sphere_fitting import generate_link_spheres, save_link_spheres, load_link_spheres
 
 # -------------------------------------------------------------------
 
@@ -57,7 +62,13 @@ class DataManager(QObject):
     # 信号 6: 将 JAX-native 的 pyroki robot 对象发送给优化线程
     pyroki_robot_loaded_signal = pyqtSignal(object) # 发射 pk.Robot 实例
 
-    # 信号 7: 加载 URDF 成功后，将 link 的初始姿态字典发射出去
+    # 信号 7: 关键点加载成功
+    hand_keypoints_loaded_signal = pyqtSignal(dict) # 发射 {link_name: points_array} 字典
+
+    # 信号 8: link球体加载成功
+    hand_link_spheres_loaded_signal = pyqtSignal(dict) # 发射 {link_name: [(center, radius), ...]} 字典
+
+    # 信号 9: 加载 URDF 成功后，将 link 的初始姿态字典发射出去
     # {link_name: np.ndarray(4,4)}
     hand_initial_pose_signal = pyqtSignal(dict)
 
@@ -93,6 +104,8 @@ class DataManager(QObject):
 
         # 5. 当前link姿态 (用于锚点调整)
         self.current_link_poses: dict[str, np.ndarray] = {}  # {link_name: 4x4 transform matrix}
+        self.current_base_translation: list[float] | None = None
+        self.current_base_rotation: list[list[float]] | None = None
 
     # --- 公共槽 (Public Slots) ---
     # 这些槽由 main_window 连接到 controls_widget 的信号
@@ -104,6 +117,11 @@ class DataManager(QObject):
         :param link_poses: {link_name: 4x4 transform matrix}
         """
         self.current_link_poses = link_poses
+
+    def update_base_pose(self, translation: list[float], rotation_matrix: list[list[float]]) -> None:
+        """记录最新的基座位姿"""
+        self.current_base_translation = translation
+        self.current_base_rotation = rotation_matrix
 
     def load_object_from_file(self, file_path: str) -> bool:
         """
@@ -190,15 +208,15 @@ class DataManager(QObject):
             # 1. 使用 yourdfpy 加载 URDF
             # yourdfpy 会自动处理 package:// 路径并加载 trimesh 场景
             print(f"DataManager: 正在使用 yourdfpy 加载: {file_path}")
-            urdf_obj = yourdfpy.URDF.load(file_path)
+            self.urdf_obj = yourdfpy.URDF.load(file_path)
             
             # 2. 使用 pyroki 创建 JAX-native Robot
             print("DataManager: 正在创建 pyroki.Robot 实例...")
-            self.pyroki_robot = pk.Robot.from_urdf(urdf_obj)
+            self.pyroki_robot = pk.Robot.from_urdf(self.urdf_obj)
             print("DataManager: pyroki.Robot 创建成功。")
 
             # 3. 提取 Link Meshes (用于 PyVista 可视化)
-            trimesh_scene = urdf_obj.scene
+            trimesh_scene = self.urdf_obj.scene
             if trimesh_scene is None:
                 raise ValueError("yourdfpy 未能加载场景 (urdf_obj.scene 为空)。")
 
@@ -272,7 +290,7 @@ class DataManager(QObject):
             
             # pyroki.joints.lower_limits/upper_limits 已经是被驱动关节的列表
             # 我们需要从 yourdfpy 中获取它们的名字以保持一致
-            actuated_names = urdf_obj.actuated_joint_names
+            actuated_names = self.urdf_obj.actuated_joint_names
 
             if len(actuated_names) != pyroki_joints.num_actuated_joints:
                 print(f"DataManager: 警告: 'yourdfpy' ({len(actuated_names)} joints) 和 'pyroki' ({pyroki_joints.num_actuated_joints} joints) 的驱动关节数量不匹配。")
@@ -302,8 +320,8 @@ class DataManager(QObject):
             # 6. 计算并
             print("DataManager: 正在计算初始姿态 (Default FK)...")
             initial_poses = {}
-            base_link_name = urdf_obj.base_link
-            scene_graph = urdf_obj.scene.graph
+            base_link_name = self.urdf_obj.base_link
+            scene_graph = self.urdf_obj.scene.graph
 
             # 我们需要为 hand_links_mesh_dict 中的每个 link 计算其全局姿态
             # 注意：urdf_obj.scene.graph 已经包含了默认姿态的变换
@@ -322,6 +340,12 @@ class DataManager(QObject):
             print(f"DataManager: 已计算 {len(initial_poses)} 个 links 的初始姿态。")
             # 发射初始姿态
             self.hand_initial_pose_signal.emit(initial_poses)
+
+            # 7. 生成或加载关键点
+            self._generate_or_load_keypoints(file_path)
+
+            # 8. 生成或加载link球体
+            self._generate_or_load_link_spheres(file_path)
             
             self.status_message_signal.emit(f"已加载机械手: {file_path}")
             return True
@@ -662,6 +686,12 @@ class DataManager(QObject):
         
         :return: (translation, rotation_matrix) 元组
         """
+        if self.current_base_translation is not None and self.current_base_rotation is not None:
+            return (
+                list(self.current_base_translation),
+                [row[:] for row in self.current_base_rotation]
+            )
+
         # 获取手掌的位姿（假设有一个名为 'palm' 或类似的基础link）
         palm_link_name = None
         for link_name in self.current_link_poses.keys():
@@ -677,6 +707,180 @@ class DataManager(QObject):
         
         # 如果找不到手掌link，返回默认值
         return [0.0, 0.0, 0.0], [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+    def _generate_or_load_keypoints(self, urdf_path: str) -> None:
+        """
+        生成或加载手模型的关键点文件
+        
+        基于体积的层级采样策略：
+        - 体积 < 10 cm³: 6 个点
+        - 10-100 cm³: 8 个点  
+        - 100-1000 cm³: 16 个点
+        - ≥1000 cm³: 32 个点
+        
+        :param urdf_path: URDF文件路径，用于生成关键点文件名
+        """
+        try:
+            # 生成关键点文件名 (与URDF同名，但扩展名为.json)
+            base_name = os.path.splitext(os.path.basename(urdf_path))[0]
+            keypoints_file = os.path.join(os.path.dirname(urdf_path), f"{base_name}_keypoints.json")
+            
+            # 检查关键点文件是否已存在
+            if os.path.exists(keypoints_file):
+                print(f"DataManager: 找到现有关键点文件: {keypoints_file}")
+                with open(keypoints_file, 'r') as f:
+                    keypoints_data = json.load(f)
+                
+                # 转换为 numpy 数组格式
+                hand_keypoints = {}
+                for link_name, points_list in keypoints_data.items():
+                    hand_keypoints[link_name] = np.array(points_list)
+                
+                print(f"DataManager: 已加载 {sum(len(points) for points in hand_keypoints.values())} 个关键点")
+            else:
+                print(f"DataManager: 未找到关键点文件，正在生成: {keypoints_file}")
+                hand_keypoints = self._generate_keypoints()
+                
+                # 保存到文件
+                keypoints_data = {link_name: points.tolist() for link_name, points in hand_keypoints.items()}
+                with open(keypoints_file, 'w') as f:
+                    json.dump(keypoints_data, f, indent=2)
+                
+                print(f"DataManager: 已生成并保存 {sum(len(points) for points in hand_keypoints.values())} 个关键点到 {keypoints_file}")
+            
+            # 发射关键点加载成功信号
+            self.hand_keypoints_loaded_signal.emit(hand_keypoints)
+            
+        except Exception as e:
+            print(f"DataManager: 关键点生成/加载失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.status_message_signal.emit(f"关键点生成失败: {e}")
+
+    def _generate_keypoints(self) -> dict[str, np.ndarray]:
+        """
+        使用FPS算法基于体积生成关键点
+        
+        :return: {link_name: points_array} 字典
+        """
+        hand_keypoints = {}
+        
+        for link_name, pv_mesh in self.hand_links_mesh_dict.items():
+            # 计算网格体积 (cm³)
+            try:
+                # PyVista mesh 体积计算
+                volume = pv_mesh.volume * 1e6  # 转换为 cm³ (PyVista使用米)
+                if volume <= 0:
+                    # 如果体积计算失败，使用边界框体积作为近似
+                    bounds = pv_mesh.bounds
+                    volume = (bounds[1] - bounds[0]) * (bounds[3] - bounds[2]) * (bounds[5] - bounds[4]) * 1e6
+                
+                # 基于体积确定采样点数
+                if volume < 10:
+                    num_points = 6
+                elif volume < 100:
+                    num_points = 8
+                elif volume < 1000:
+                    num_points = 16
+                else:
+                    num_points = 32
+                
+                # 使用FPS算法采样关键点
+                points = self._farthest_point_sampling(pv_mesh, num_points)
+                hand_keypoints[link_name] = points
+                
+                print(f"DataManager: {link_name} (体积: {volume:.1f} cm³) -> {num_points} 个关键点")
+                
+            except Exception as e:
+                print(f"DataManager: 为 {link_name} 生成关键点失败: {e}")
+                # 使用边界框中心作为后备
+                bounds = pv_mesh.bounds
+                center = np.array([
+                    (bounds[0] + bounds[1]) / 2,
+                    (bounds[2] + bounds[3]) / 2,
+                    (bounds[4] + bounds[5]) / 2
+                ])
+                hand_keypoints[link_name] = center.reshape(1, -1)
+                print(f"DataManager: 为 {link_name} 使用边界框中心作为关键点")
+        
+        return hand_keypoints
+
+    def _farthest_point_sampling(self, pv_mesh: pyvista.PolyData, num_points: int) -> np.ndarray:
+        """
+        使用最远点采样(FPS)算法从网格采样关键点
+        
+        :param pv_mesh: PyVista网格
+        :param num_points: 采样点数
+        :return: 采样点数组 (N, 3)
+        """
+        # 获取网格顶点
+        vertices = pv_mesh.points
+        
+        if len(vertices) == 0:
+            raise ValueError("网格没有顶点")
+        
+        if len(vertices) <= num_points:
+            return vertices
+        
+        # 初始化：选择第一个点（随机或几何中心）
+        selected_indices = [0]  # 从第一个顶点开始
+        min_distances = np.full(len(vertices), np.inf)
+        
+        for _ in range(1, num_points):
+            # 计算所有点到已选点的最近距离
+            for i, selected_idx in enumerate(selected_indices):
+                distances = np.linalg.norm(vertices - vertices[selected_idx], axis=1)
+                min_distances = np.minimum(min_distances, distances)
+            
+            # 选择距离最远的点
+            farthest_idx = np.argmax(min_distances)
+            selected_indices.append(farthest_idx)
+            
+            # 重置该点的距离为0
+            min_distances[farthest_idx] = 0
+        
+        return vertices[selected_indices]
+
+    def _generate_or_load_link_spheres(self, urdf_path: str) -> None:
+        """
+        生成或加载手模型的link球体数据
+
+        基于体积的层级策略：
+        - 体积 < 10 cm³: 2 个球体
+        - 10-100 cm³: 3 个球体
+        - 100-1000 cm³: 4 个球体
+        - ≥1000 cm³: 6 个球体
+
+        :param urdf_path: URDF文件路径，用于生成球体文件名
+        """
+        try:
+            # 生成球体文件名 (与URDF同名，但扩展名为_spheres.json)
+            base_name = os.path.splitext(os.path.basename(urdf_path))[0]
+            spheres_file = os.path.join(os.path.dirname(urdf_path), f"{base_name}_spheres.json")
+
+            # 检查球体文件是否已存在
+            if os.path.exists(spheres_file):
+                print(f"DataManager: 找到现有球体文件: {spheres_file}")
+                link_spheres = load_link_spheres(spheres_file)
+            else:
+                print(f"DataManager: 未找到球体文件，正在生成: {spheres_file}")
+                link_spheres = generate_link_spheres(self.hand_links_mesh_dict, method='bounding_box_packing', urdf_obj=self.urdf_obj)
+
+                # 保存到文件
+                save_link_spheres(link_spheres, spheres_file)
+                print(f"DataManager: 已生成并保存球体数据到 {spheres_file}")
+
+            total_spheres = sum(len(spheres) for spheres in link_spheres.values())
+            print(f"DataManager: 已加载 {total_spheres} 个球体用于 {len(link_spheres)} 个links")
+
+            # 发射球体加载成功信号
+            self.hand_link_spheres_loaded_signal.emit(link_spheres)
+
+        except Exception as e:
+            print(f"DataManager: 球体生成/加载失败: {e}")
+            import traceback
+            traceback.print_exc()
+            self.status_message_signal.emit(f"球体生成失败: {e}")
 
 # --- 用于独立测试 ---
 if __name__ == '__main__':

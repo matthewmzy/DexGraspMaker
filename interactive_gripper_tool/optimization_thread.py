@@ -15,6 +15,8 @@ from optimization import (
     AnchorPointEnergy,
     JointLimitEnergy,
     CollisionAvoidanceEnergy,
+    PenetrationAvoidanceEnergy,
+    SelfCollisionAvoidanceEnergy,
     CompositeEnergy,
     create_adam,
 )
@@ -32,6 +34,8 @@ class OptimizationThread(QThread):
     """
     
     pose_update_signal = pyqtSignal(dict)
+    base_pose_updated_signal = pyqtSignal(list, list)
+    joint_values_updated_signal = pyqtSignal(dict)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -52,7 +56,16 @@ class OptimizationThread(QThread):
         # 2. 锚点
         self.anchor_pairs: list[dict] = []
         
-        # 3. 优化参数 (这是您用 JAX/PyTorch 优化的变量)
+        # 3. 物体网格（用于穿透避免）
+        self.object_mesh = None
+        
+        # 4. 手关键点（用于穿透避免）
+        self.hand_keypoints: dict[str, np.ndarray] = {}
+        
+        # 5. 手link球体（用于自碰撞避免）
+        self.link_spheres: dict[str, list] = {}
+        
+        # 6. 优化参数 (这是您用 JAX/PyTorch 优化的变量)
         self.current_base_pose: np.ndarray = np.eye(4)
         self.current_joint_values: dict[str, float] = {} # {joint_name: value}
         
@@ -100,12 +113,16 @@ class OptimizationThread(QThread):
         # 创建能量函数
         anchor_energy = AnchorPointEnergy(weight=1.0)
         joint_limit_energy = JointLimitEnergy(weight=0.5, margin=0.1)
+        penetration_energy = PenetrationAvoidanceEnergy(weight=0.5, margin=0.005)
+        self_collision_energy = SelfCollisionAvoidanceEnergy(weight=0.3, margin=0.005)
         # collision_energy = CollisionAvoidanceEnergy(weight=0.1, margin=0.01)
         
         # 组合能量函数
         self.energy_function = CompositeEnergy([
             anchor_energy,
             joint_limit_energy,
+            penetration_energy,
+            self_collision_energy,
             # collision_energy  # 暂时禁用，需要实现碰撞检测
         ])
         
@@ -229,10 +246,15 @@ class OptimizationThread(QThread):
                 # 将计算结果存回状态变量
                 self.current_base_pose = new_pose
                 self.current_joint_values = new_joints
+                base_translation = self.current_base_pose[:3, 3].tolist()
+                base_rotation = self.current_base_pose[:3, :3].tolist()
+                joint_snapshot = dict(self.current_joint_values)
             
             # 发射信号 (没有锁！)
             # 'vista_widget' 将接收此信号
             self.pose_update_signal.emit(link_poses_dict)
+            self.base_pose_updated_signal.emit(base_translation, base_rotation)
+            self.joint_values_updated_signal.emit(joint_snapshot)
             
             # 休息 16ms (~60 FPS) 以产生平滑的动画效果
             # 并防止 CPU 100% 占用
@@ -260,6 +282,17 @@ class OptimizationThread(QThread):
             self.wait_condition.wakeAll() # 唤醒 'run' 循环
 
     @pyqtSlot(object)
+    def set_object_mesh(self, mesh) -> None:
+        """
+        设置物体网格，用于穿透避免计算
+        
+        Args:
+            mesh: pyvista.PolyData 或 trimesh.Trimesh 对象
+        """
+        with QMutexLocker(self.mutex):
+            self.object_mesh = mesh
+            print(f"OptimizationThread: 设置了物体网格，顶点数: {len(mesh.points) if hasattr(mesh, 'points') else '未知'}")
+    
     def set_pyroki_robot(self, robot: pk.Robot) -> None:
         """
         槽：当 data_manager 加载完 URDF 后调用。
@@ -298,6 +331,50 @@ class OptimizationThread(QThread):
                 self._needs_optimization = True
                 self.wait_condition.wakeAll()
 
+    @pyqtSlot(dict)
+    def set_hand_keypoints(self, keypoints: dict[str, np.ndarray]) -> None:
+        """
+        槽：当 data_manager 加载完关键点后调用。
+        
+        Args:
+            keypoints: {link_name: points_array} 字典
+        """
+        with QMutexLocker(self.mutex):
+            self.hand_keypoints = keypoints.copy()
+            
+            # 更新能量函数中的关键点
+            if hasattr(self.energy_function, 'energies'):
+                for energy in self.energy_function.energies:
+                    if isinstance(energy, PenetrationAvoidanceEnergy):
+                        energy.set_key_points(self.hand_keypoints)
+                        print(f"OptimizationThread: 已设置 {sum(len(points) for points in keypoints.values())} 个关键点到穿透避免能量函数")
+                        break
+            
+            print(f"OptimizationThread: 已接收手关键点，共 {len(keypoints)} 个link，{sum(len(points) for points in keypoints.values())} 个点")
+
+    @pyqtSlot(dict)
+    def set_link_spheres(self, spheres: dict[str, list]) -> None:
+        """
+        槽：当 data_manager 加载完link球体数据后调用。
+
+        Args:
+            spheres: {link_name: [(center, radius), ...]} 字典
+        """
+        with QMutexLocker(self.mutex):
+            self.link_spheres = spheres.copy()
+
+            # 更新能量函数中的球体数据
+            if hasattr(self.energy_function, 'energies'):
+                for energy in self.energy_function.energies:
+                    if isinstance(energy, SelfCollisionAvoidanceEnergy):
+                        energy.set_link_spheres(self.link_spheres)
+                        total_spheres = sum(len(sphere_list) for sphere_list in spheres.values())
+                        print(f"OptimizationThread: 已设置 {total_spheres} 个球体到自碰撞避免能量函数")
+                        break
+
+            total_spheres = sum(len(sphere_list) for sphere_list in spheres.values())
+            print(f"OptimizationThread: 已接收link球体，共 {len(spheres)} 个link，{total_spheres} 个球体")
+
     @pyqtSlot(str, float)
     def set_manual_joint(self, joint_name: str, value: float) -> None:
         """
@@ -311,6 +388,51 @@ class OptimizationThread(QThread):
                 self._is_paused = True # 手动调节时暂停优化
                 
                 self.wait_condition.wakeAll() # 唤醒 'run' 循环以应用FK
+
+    @pyqtSlot(float, float, float)
+    def set_base_translation(self, x: float, y: float, z: float) -> None:
+        """槽：从 UI 调整基座平移"""
+        with QMutexLocker(self.mutex):
+            self.current_base_pose[:3, 3] = np.array([x, y, z], dtype=float)
+            self._manual_update = True
+            self._needs_optimization = False
+            self._is_paused = True
+            self.wait_condition.wakeAll()
+
+    @staticmethod
+    def _euler_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
+        """将 roll-pitch-yaw (按 ZYX 顺序) 转换为 3x3 旋转矩阵"""
+        cx, cy, cz = np.cos(roll), np.cos(pitch), np.cos(yaw)
+        sx, sy, sz = np.sin(roll), np.sin(pitch), np.sin(yaw)
+
+        R_x = np.array(
+            [[1.0, 0.0, 0.0],
+             [0.0, cx, -sx],
+             [0.0, sx, cx]]
+        )
+        R_y = np.array(
+            [[cy, 0.0, sy],
+             [0.0, 1.0, 0.0],
+             [-sy, 0.0, cy]]
+        )
+        R_z = np.array(
+            [[cz, -sz, 0.0],
+             [sz, cz, 0.0],
+             [0.0, 0.0, 1.0]]
+        )
+
+        return R_z @ R_y @ R_x
+
+    @pyqtSlot(float, float, float)
+    def set_base_rotation(self, roll: float, pitch: float, yaw: float) -> None:
+        """槽：从 UI 调整基座旋转（弧度）"""
+        with QMutexLocker(self.mutex):
+            rotation_matrix = self._euler_to_matrix(roll, pitch, yaw)
+            self.current_base_pose[:3, :3] = rotation_matrix
+            self._manual_update = True
+            self._needs_optimization = False
+            self._is_paused = True
+            self.wait_condition.wakeAll()
 
     # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
     # ▼▼▼▼▼▼ [真实优化实现] ▼▼▼▼▼▼
@@ -393,7 +515,8 @@ class OptimizationThread(QThread):
             return self.energy_function.compute(
                 opt_state,
                 self.robot,
-                anchor_pairs=prepared_anchors
+                anchor_pairs=prepared_anchors,
+                object_mesh=self.object_mesh
             )
         
         # 4. 执行一步优化
@@ -409,7 +532,7 @@ class OptimizationThread(QThread):
             if self._step_counter % 30 == 0:  # 每30步打印一次
                 # 获取详细能量
                 detailed_energies = self.energy_function.compute_detailed(
-                    new_state, self.robot, anchor_pairs=prepared_anchors
+                    new_state, self.robot, anchor_pairs=prepared_anchors, object_mesh=self.object_mesh
                 )
                 energy_str = ", ".join([f"{k}: {v:.4f}" for k, v in detailed_energies.items()])
                 print(f"OptimizationThread: Step {self._step_counter}, Total Loss: {loss_value:.4f} ({energy_str})")

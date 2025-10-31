@@ -9,8 +9,8 @@ from PyQt6.QtWidgets import (
     QGridLayout, QScrollArea, QFrame, QApplication, QColorDialog, QCheckBox,
     QStyledItemDelegate, QHBoxLayout
 )
-from PyQt6.QtCore import pyqtSignal, Qt, pyqtSlot
-from PyQt6.QtGui import QColor, QBrush
+from PyQt6.QtCore import pyqtSignal, Qt, pyqtSlot, QUrl
+from PyQt6.QtGui import QColor, QBrush, QDesktopServices
 
 class ControlsWidget(QWidget):
     """
@@ -49,6 +49,10 @@ class ControlsWidget(QWidget):
     
     # 流程 4: 关节调试
     manual_joint_changed_signal = pyqtSignal(str, float)
+
+    # 基座位姿调整
+    base_translation_changed_signal = pyqtSignal(float, float, float)
+    base_rotation_changed_signal = pyqtSignal(float, float, float)
     
     # 优化控制
     optimization_toggle_signal = pyqtSignal(bool)  # True=开始, False=暂停
@@ -79,6 +83,14 @@ class ControlsWidget(QWidget):
         
         # 存储锚点调整按钮的引用，用于状态更新
         self.anchor_adjust_buttons = {}  # {(anchor_index, point_type): button}
+
+        # 平移/旋转控制缓存
+        self.translation_spinboxes: dict[str, QDoubleSpinBox] = {}
+        self.translation_sliders: dict[str, QSlider] = {}
+        self.rotation_spinboxes: dict[str, QDoubleSpinBox] = {}
+        self.rotation_sliders: dict[str, QSlider] = {}
+        self._updating_pose_controls = False
+        self._updating_joint_controls = False
         
         # 添加锚点状态
         self.is_adding_anchor = False
@@ -309,54 +321,85 @@ class ControlsWidget(QWidget):
     def _create_joints_tab(self) -> QWidget:
         """创建 "关节调试" 选项卡"""
         tab_widget = QWidget()
-        main_layout = QHBoxLayout(tab_widget)  # 改为水平布局
-        
-        # 左侧控制面板 (40%)
-        left_panel = self._create_joints_left_panel()
-        left_panel.setFixedWidth(300)  # 固定宽度约40%
-        
-        # 右侧关节滑块面板 (60%)
-        right_panel = self._create_joints_right_panel()
-        
-        main_layout.addWidget(left_panel, 2)  # 比例 2
-        main_layout.addWidget(right_panel, 3)  # 比例 3
-        
+        main_layout = QHBoxLayout(tab_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(12)
+
+        primary_column = self._create_joints_primary_column()
+        transform_column = self._create_transform_column()
+        joints_column = self._create_joints_right_panel()
+
+        main_layout.addWidget(primary_column, 1)
+        main_layout.addWidget(transform_column, 1)
+        main_layout.addWidget(joints_column, 2)
+
         return tab_widget
 
-    def _create_joints_left_panel(self) -> QWidget:
-        """创建关节调试左侧控制面板"""
-        panel = QWidget()
-        layout = QVBoxLayout(panel)
-        
+    def _create_joints_primary_column(self) -> QWidget:
+        """创建包含优化和姿态管理的左侧列"""
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setSpacing(12)
+
         # 优化控制组
         opt_group = QGroupBox("优化控制")
         opt_layout = QVBoxLayout(opt_group)
-        
-        # 优化开启/暂停按钮
+
         self.optimization_toggle_button = QPushButton("▶️ 开始优化")
         self.optimization_toggle_button.setCheckable(True)
-        self.optimization_toggle_button.setChecked(True)  # 默认开启
+        self.optimization_toggle_button.setChecked(True)
         self.optimization_toggle_button.clicked.connect(self._on_optimization_toggle)
         opt_layout.addWidget(self.optimization_toggle_button)
-        
+
         layout.addWidget(opt_group)
-        
-        # 手姿态显示组
-        pose_group = QGroupBox("手姿态")
+
+        # 姿态导入/导出组
+        pose_io_group = QGroupBox("姿态管理")
+        pose_io_layout = QVBoxLayout(pose_io_group)
+
+        self.import_pose_button = QPushButton("📥 导入姿态")
+        self.import_pose_button.clicked.connect(self._on_import_pose)
+        pose_io_layout.addWidget(self.import_pose_button)
+
+        self.export_pose_button = QPushButton("📤 导出姿态")
+        self.export_pose_button.clicked.connect(self._on_export_pose)
+        pose_io_layout.addWidget(self.export_pose_button)
+
+        layout.addWidget(pose_io_group)
+
+        layout.addStretch()
+
+        return column
+
+    def _create_transform_column(self) -> QWidget:
+        """创建平移与旋转调节的中间列"""
+        column = QWidget()
+        layout = QVBoxLayout(column)
+        layout.setSpacing(12)
+
+        layout.addWidget(self._create_pose_snapshot_group())
+        layout.addWidget(self._create_translation_controls_group())
+        layout.addWidget(self._create_rotation_controls_group())
+
+        layout.addStretch()
+
+        return column
+
+    def _create_pose_snapshot_group(self) -> QGroupBox:
+        """当前姿态快照显示"""
+        pose_group = QGroupBox("当前姿态 (只读)")
         pose_layout = QVBoxLayout(pose_group)
-        
-        # 平移矩阵
-        translation_label = QLabel("平移 (X, Y, Z):")
+
+        translation_label = QLabel("平移 (mm):")
         pose_layout.addWidget(translation_label)
-        
-        self.translation_display = QLabel("0.000, 0.000, 0.000")
+
+        self.translation_display = QLabel("0.00, 0.00, 0.00")
         self.translation_display.setStyleSheet("font-family: monospace; background-color: #f0f0f0; padding: 5px;")
         pose_layout.addWidget(self.translation_display)
-        
-        # 旋转矩阵
+
         rotation_label = QLabel("旋转矩阵:")
         pose_layout.addWidget(rotation_label)
-        
+
         self.rotation_display = QLabel(
             "1.000  0.000  0.000\n"
             "0.000  1.000  0.000\n"
@@ -364,27 +407,99 @@ class ControlsWidget(QWidget):
         )
         self.rotation_display.setStyleSheet("font-family: monospace; background-color: #f0f0f0; padding: 5px;")
         pose_layout.addWidget(self.rotation_display)
-        
-        layout.addWidget(pose_group)
-        
-        # 姿态导入/导出组
-        io_group = QGroupBox("姿态管理")
-        io_layout = QVBoxLayout(io_group)
-        
-        self.import_pose_button = QPushButton("📥 导入姿态")
-        self.import_pose_button.clicked.connect(self._on_import_pose)
-        io_layout.addWidget(self.import_pose_button)
-        
-        self.export_pose_button = QPushButton("📤 导出姿态")
-        self.export_pose_button.clicked.connect(self._on_export_pose)
-        io_layout.addWidget(self.export_pose_button)
-        
-        layout.addWidget(io_group)
-        
-        # 添加伸缩空间
-        layout.addStretch()
-        
-        return panel
+
+        return pose_group
+
+    def _create_translation_controls_group(self) -> QGroupBox:
+        """创建基座平移控制"""
+        group = QGroupBox("基座平移调整")
+        layout = QVBoxLayout(group)
+
+        axes = (
+            ("x", "X", "前后"),
+            ("y", "Y", "左右"),
+            ("z", "Z", "上下"),
+        )
+
+        for axis_key, axis_label, axis_hint in axes:
+            row = QHBoxLayout()
+            label = QLabel(f"{axis_label} ({axis_hint})")
+            label.setMinimumWidth(70)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(-200, 200)  # 单位 mm
+            slider.setSingleStep(1)
+            spinbox = QDoubleSpinBox()
+            spinbox.setRange(-200.0, 200.0)
+            spinbox.setDecimals(2)
+            spinbox.setSingleStep(0.5)
+            spinbox.setSuffix(" mm")
+
+            slider.valueChanged.connect(lambda value, axis=axis_key: self._on_translation_slider_changed(axis, value))
+            spinbox.valueChanged.connect(lambda value, axis=axis_key: self._on_translation_spinbox_changed(axis, value))
+
+            row.addWidget(label)
+            row.addWidget(slider, 1)
+            row.addWidget(spinbox)
+            layout.addLayout(row)
+
+            self.translation_sliders[axis_key] = slider
+            self.translation_spinboxes[axis_key] = spinbox
+
+        reset_button = QPushButton("重置平移")
+        reset_button.clicked.connect(self._reset_translation_controls)
+        layout.addWidget(reset_button)
+
+        return group
+
+    def _create_rotation_controls_group(self) -> QGroupBox:
+        """创建基座旋转控制"""
+        group = QGroupBox("基座旋转调整")
+        layout = QVBoxLayout(group)
+
+        axes = (
+            ("roll", "绕X (Roll)"),
+            ("pitch", "绕Y (Pitch)"),
+            ("yaw", "绕Z (Yaw)"),
+        )
+
+        for axis_key, axis_label in axes:
+            row = QHBoxLayout()
+            label = QLabel(axis_label)
+            label.setMinimumWidth(100)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(-180, 180)
+            slider.setSingleStep(1)
+            spinbox = QDoubleSpinBox()
+            spinbox.setRange(-180.0, 180.0)
+            spinbox.setDecimals(1)
+            spinbox.setSingleStep(1.0)
+            spinbox.setSuffix(" °")
+
+            slider.valueChanged.connect(lambda value, axis=axis_key: self._on_rotation_slider_changed(axis, value))
+            spinbox.valueChanged.connect(lambda value, axis=axis_key: self._on_rotation_spinbox_changed(axis, value))
+
+            row.addWidget(label)
+            row.addWidget(slider, 1)
+            row.addWidget(spinbox)
+            layout.addLayout(row)
+
+            self.rotation_sliders[axis_key] = slider
+            self.rotation_spinboxes[axis_key] = spinbox
+
+        reset_button = QPushButton("重置旋转")
+        reset_button.clicked.connect(self._reset_rotation_controls)
+        layout.addWidget(reset_button)
+
+        tutorial_label = QLabel(
+            "想要更直观的旋转交互？Qt 官方提供了 Trackball Camera Controller 示例，"
+            "可在 Qt 6 文档中找到 (<a href=\"https://doc.qt.io/qt-6/qt3d-trackballcameracontroller.html\">教程链接</a>)。"
+        )
+        tutorial_label.setWordWrap(True)
+        tutorial_label.setOpenExternalLinks(False)
+        tutorial_label.linkActivated.connect(lambda url: QDesktopServices.openUrl(QUrl(url)))
+        layout.addWidget(tutorial_label)
+
+        return group
 
     def _create_joints_right_panel(self) -> QWidget:
         """创建关节调试右侧滑块面板"""
@@ -409,6 +524,120 @@ class ControlsWidget(QWidget):
         layout.addWidget(scroll_area)
         
         return panel
+
+    def _reset_translation_controls(self) -> None:
+        """重置平移控件到零"""
+        self._updating_pose_controls = True
+        for axis in self.translation_sliders:
+            self.translation_sliders[axis].setValue(0)
+            self.translation_spinboxes[axis].setValue(0.0)
+        self._updating_pose_controls = False
+        self.base_translation_changed_signal.emit(0.0, 0.0, 0.0)
+
+    def _reset_rotation_controls(self) -> None:
+        """重置旋转控件到零"""
+        self._updating_pose_controls = True
+        for axis in self.rotation_sliders:
+            self.rotation_sliders[axis].setValue(0)
+            self.rotation_spinboxes[axis].setValue(0.0)
+        self._updating_pose_controls = False
+        self.base_rotation_changed_signal.emit(0.0, 0.0, 0.0)
+
+    def _on_translation_slider_changed(self, axis: str, value: int) -> None:
+        if self._updating_pose_controls:
+            return
+        self._updating_pose_controls = True
+        self.translation_spinboxes[axis].setValue(float(value))
+        self._updating_pose_controls = False
+        self._emit_translation_signal()
+
+    def _on_translation_spinbox_changed(self, axis: str, value: float) -> None:
+        if self._updating_pose_controls:
+            return
+        self._updating_pose_controls = True
+        self.translation_sliders[axis].setValue(int(round(value)))
+        self._updating_pose_controls = False
+        self._emit_translation_signal()
+
+    def _emit_translation_signal(self) -> None:
+        x_mm = self.translation_spinboxes['x'].value()
+        y_mm = self.translation_spinboxes['y'].value()
+        z_mm = self.translation_spinboxes['z'].value()
+        self.base_translation_changed_signal.emit(x_mm / 1000.0, y_mm / 1000.0, z_mm / 1000.0)
+
+    def _on_rotation_slider_changed(self, axis: str, value: int) -> None:
+        if self._updating_pose_controls:
+            return
+        self._updating_pose_controls = True
+        self.rotation_spinboxes[axis].setValue(float(value))
+        self._updating_pose_controls = False
+        self._emit_rotation_signal()
+
+    def _on_rotation_spinbox_changed(self, axis: str, value: float) -> None:
+        if self._updating_pose_controls:
+            return
+        self._updating_pose_controls = True
+        self.rotation_sliders[axis].setValue(int(round(value)))
+        self._updating_pose_controls = False
+        self._emit_rotation_signal()
+
+    def _emit_rotation_signal(self) -> None:
+        roll = self.rotation_spinboxes['roll'].value()
+        pitch = self.rotation_spinboxes['pitch'].value()
+        yaw = self.rotation_spinboxes['yaw'].value()
+        self.base_rotation_changed_signal.emit(np.deg2rad(roll), np.deg2rad(pitch), np.deg2rad(yaw))
+
+    def _on_joint_slider_changed(self, joint_name: str, slider_value: int) -> None:
+        if self._updating_joint_controls:
+            return
+
+        controls = self.joint_controls.get(joint_name)
+        if not controls:
+            return
+
+        float_value = slider_value / 1000.0
+        self._updating_joint_controls = True
+        controls['spinbox'].setValue(float_value)
+        self._updating_joint_controls = False
+
+        self.manual_joint_changed_signal.emit(joint_name, float_value)
+
+    def _on_joint_spinbox_changed(self, joint_name: str, spinbox_value: float) -> None:
+        if self._updating_joint_controls:
+            return
+
+        controls = self.joint_controls.get(joint_name)
+        if not controls:
+            return
+
+        slider_val = int(round(spinbox_value * 1000))
+        self._updating_joint_controls = True
+        controls['slider'].setValue(slider_val)
+        self._updating_joint_controls = False
+
+        self.manual_joint_changed_signal.emit(joint_name, spinbox_value)
+
+    @pyqtSlot(dict)
+    def update_joint_controls(self, joint_values: dict[str, float]) -> None:
+        """根据优化状态同步关节控制器"""
+        if not joint_values or not self.joint_controls:
+            return
+
+        self._updating_joint_controls = True
+        for joint_name, value in joint_values.items():
+            controls = self.joint_controls.get(joint_name)
+            if not controls:
+                continue
+            slider = controls['slider']
+            spinbox = controls['spinbox']
+
+            slider_val = int(round(value * 1000))
+            slider_val = max(slider.minimum(), min(slider.maximum(), slider_val))
+            slider.setValue(slider_val)
+
+            bounded_value = float(np.clip(value, spinbox.minimum(), spinbox.maximum()))
+            spinbox.setValue(bounded_value)
+        self._updating_joint_controls = False
 
     # --- 槽函数 ---
 
@@ -614,15 +843,8 @@ class ControlsWidget(QWidget):
             frame_layout.addWidget(spinbox, 0, 2)
             
             # 连接信号
-            slider.valueChanged.connect(
-                lambda val, sb=spinbox: sb.setValue(val / 1000.0)
-            )
-            spinbox.valueChanged.connect(
-                lambda val, sl=slider: sl.setValue(int(val * 1000))
-            )
-            spinbox.valueChanged.connect(
-                lambda val, jname=name: self.manual_joint_changed_signal.emit(jname, val)
-            )
+            slider.valueChanged.connect(lambda val, jname=name: self._on_joint_slider_changed(jname, val))
+            spinbox.valueChanged.connect(lambda val, jname=name: self._on_joint_spinbox_changed(jname, val))
             
             # 添加到布局
             self.joints_layout.addWidget(frame)
@@ -740,12 +962,36 @@ class ControlsWidget(QWidget):
         :param translation: 平移向量 [x, y, z]
         :param rotation_matrix: 3x3旋转矩阵
         """
-        # 更新平移显示
-        self.translation_display.setText(".3f")
-        
-        # 更新旋转矩阵显示
-        rot_text = ".3f"
-        self.rotation_display.setText(rot_text)
+        translation_np = np.array(translation, dtype=float)
+        rotation_np = np.array(rotation_matrix, dtype=float).reshape(3, 3)
+
+        translation_mm = translation_np * 1000.0
+        trans_text = ", ".join(f"{value:+.2f}" for value in translation_mm)
+        self.translation_display.setText(trans_text)
+
+        rot_lines = [
+            "  ".join(f"{rotation_np[row, col]:+.3f}" for col in range(3))
+            for row in range(3)
+        ]
+        self.rotation_display.setText("\n".join(rot_lines))
+
+        # 同步控件状态
+        if self.translation_spinboxes and self.rotation_spinboxes:
+            self._updating_pose_controls = True
+
+            for axis_key, value in zip(("x", "y", "z"), translation_mm):
+                clamped_value = float(np.clip(value, -200.0, 200.0))
+                self.translation_spinboxes[axis_key].setValue(clamped_value)
+                self.translation_sliders[axis_key].setValue(int(round(np.clip(value, -200.0, 200.0))))
+
+            roll, pitch, yaw = self._rotation_matrix_to_euler(rotation_np)
+            euler_deg = np.rad2deg([roll, pitch, yaw])
+            for axis_key, value in zip(("roll", "pitch", "yaw"), euler_deg):
+                clamped = float(np.clip(value, -180.0, 180.0))
+                self.rotation_spinboxes[axis_key].setValue(clamped)
+                self.rotation_sliders[axis_key].setValue(int(round(np.clip(value, -180.0, 180.0))))
+
+            self._updating_pose_controls = False
 
     def set_optimization_state(self, is_running: bool) -> None:
         """
@@ -758,6 +1004,23 @@ class ControlsWidget(QWidget):
             self.optimization_toggle_button.setText("⏸️ 暂停优化")
         else:
             self.optimization_toggle_button.setText("▶️ 开始优化")
+
+    @staticmethod
+    def _rotation_matrix_to_euler(rotation: np.ndarray) -> tuple[float, float, float]:
+        """将旋转矩阵转换为 ZYX 顺序的欧拉角 (roll, pitch, yaw)"""
+        sy = np.sqrt(rotation[0, 0] ** 2 + rotation[1, 0] ** 2)
+        singular = sy < 1e-6
+
+        if not singular:
+            roll = np.arctan2(rotation[2, 1], rotation[2, 2])
+            pitch = np.arctan2(-rotation[2, 0], sy)
+            yaw = np.arctan2(rotation[1, 0], rotation[0, 0])
+        else:
+            roll = np.arctan2(-rotation[1, 2], rotation[1, 1])
+            pitch = np.arctan2(-rotation[2, 0], sy)
+            yaw = 0.0
+
+        return roll, pitch, yaw
 
 
 # --- 测试代码 ---

@@ -125,6 +125,8 @@ class MainWindow(QMainWindow):
         self.data_manager.object_loaded_signal.connect(
             lambda mesh_data: self.view_center.load_mesh(mesh_data, name="object", opacity=0.5) # 物体在中间半透明
         )
+        # 数据管理器 (加载成功) -> 优化线程 (设置物体网格用于穿透避免)
+        self.data_manager.object_loaded_signal.connect(self.optimization_thread.set_object_mesh)
         self.data_manager.hand_loaded_signal.connect(
             lambda links_dict: self.view_right.load_hand(links_dict, name_prefix="static_hand_") # 右侧，静态（用于拾取）
         )
@@ -140,8 +142,10 @@ class MainWindow(QMainWindow):
         
         # --- 流程 1c: 将 JAX Robot 模型发送到后端 ---
         self.data_manager.pyroki_robot_loaded_signal.connect(self.optimization_thread.set_pyroki_robot)
+        self.data_manager.hand_keypoints_loaded_signal.connect(self.optimization_thread.set_hand_keypoints)
+        self.data_manager.hand_link_spheres_loaded_signal.connect(self.optimization_thread.set_link_spheres)
 
-        # --- 流程 2: 锚点拾取（新版工作流） ---
+        # --- 流程 2: 锚点拾取（新版工作流）---
         # 控件 (添加锚点对按钮) -> 数据管理器 (激活拾取)
         self.controls_widget.add_anchor_pair_signal.connect(
             lambda: self.data_manager.set_picking_mode(True)
@@ -221,7 +225,13 @@ class MainWindow(QMainWindow):
         # 控件 (滑块) -> 优化线程 (设置关节值并计算FK)
         # (优化线程将通过 pose_update_signal 发出新位姿)
         self.controls_widget.manual_joint_changed_signal.connect(self.optimization_thread.set_manual_joint)
+        self.controls_widget.base_translation_changed_signal.connect(self.optimization_thread.set_base_translation)
+        self.controls_widget.base_rotation_changed_signal.connect(self.optimization_thread.set_base_rotation)
         
+        # --- 流程 6.5: 状态同步 ---
+        self.optimization_thread.base_pose_updated_signal.connect(self.on_base_pose_updated)
+        self.optimization_thread.joint_values_updated_signal.connect(self.controls_widget.update_joint_controls)
+
         # --- 流程 7: 优化控制 ---
         self.controls_widget.optimization_toggle_signal.connect(self.on_optimization_toggle)
         
@@ -523,6 +533,11 @@ class MainWindow(QMainWindow):
         # 更新手姿态显示
         self.update_hand_pose_display()
 
+    def on_base_pose_updated(self, translation: list, rotation_matrix: list) -> None:
+        """优化线程同步的基座姿态更新"""
+        self.data_manager.update_base_pose(translation, rotation_matrix)
+        self.controls_widget.update_hand_pose_display(translation, rotation_matrix)
+
     def load_default_assets(self) -> None:
         """
         自动加载默认测试资源
@@ -620,6 +635,9 @@ class MainWindow(QMainWindow):
         """
         if is_running:
             self.optimization_thread.resume()
+            # 如果有锚点，开始优化
+            if self.data_manager.anchor_pairs:
+                self.optimization_thread.trigger_optimization(self.data_manager.anchor_pairs)
             print("优化已恢复")
         else:
             self.optimization_thread.pause()

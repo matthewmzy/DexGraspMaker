@@ -9,6 +9,8 @@ from .energy_functions import (
     EnergyFunction,
     AnchorPointEnergy,
     CollisionAvoidanceEnergy,
+    PenetrationAvoidanceEnergy,
+    SelfCollisionAvoidanceEnergy,
     ManipulabilityEnergy,
     JointLimitEnergy,
     CompositeEnergy

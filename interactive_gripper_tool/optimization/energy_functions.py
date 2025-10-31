@@ -9,6 +9,7 @@
 import jax
 import jax.numpy as jnp
 import jaxlie
+import numpy as np
 from typing import List, Dict, Tuple
 from abc import ABC, abstractmethod
 
@@ -92,6 +93,123 @@ class AnchorPointEnergy(EnergyFunction):
         return self.weight
 
 
+class PenetrationAvoidanceEnergy(EnergyFunction):
+    """
+    穿透避免能量：防止手部穿透到物体内部
+    
+    计算手部关键点到物体网格的最小距离，当距离为负时施加惩罚
+    """
+    
+    def __init__(self, weight: float = 1.0, margin: float = 0.005, 
+                 hand_key_points: Dict[str, np.ndarray] = None):
+        """
+        Args:
+            weight: 能量权重
+            margin: 安全距离（米），距离小于此值时开始施加惩罚
+            hand_key_points: 手部关键点字典 {link_name: points_array}
+                如果为None，则需要通过set_key_points()方法设置
+        """
+        self.weight = weight
+        self.margin = margin
+        self.hand_key_points = hand_key_points
+    
+    def set_key_points(self, key_points: Dict[str, np.ndarray]):
+        """
+        设置手部关键点
+        
+        Args:
+            key_points: {link_name: points_array} 字典
+        """
+        self.hand_key_points = key_points
+    
+    def compute(self, state, robot, object_mesh=None, **kwargs) -> jnp.ndarray:
+        """
+        计算穿透避免能量
+        
+        Args:
+            object_mesh: 物体网格 (pyvista.PolyData 或 trimesh.Trimesh)
+        """
+        if object_mesh is None or self.hand_key_points is None:
+            return jnp.array(0.0)
+        
+        total_energy = 0.0
+        
+        # 1. 运行 FK 获取所有 link 位姿
+        link_poses_rel_root = robot.forward_kinematics(state.joint_values)
+        T_world_base = state.to_base_pose_se3()
+        
+        # 2. 对每个link的关键点计算到物体的距离
+        for link_name, key_points in self.hand_key_points.items():
+            # 查找 link 索引
+            try:
+                link_idx = robot.links.names.index(link_name)
+            except ValueError:
+                # 如果找不到指定的 link，跳过
+                continue
+            
+            # 获取 link 在世界坐标系中的位姿
+            T_root_link = jaxlie.SE3(link_poses_rel_root[link_idx])
+            T_world_link = T_world_base @ T_root_link
+            
+            # 对每个关键点计算距离
+            for p_local in key_points:
+                p_local = jnp.array(p_local)
+                
+                # 将局部坐标转换为世界坐标
+                p_local_homo = jnp.append(p_local, 1.0)
+                p_world = (T_world_link.as_matrix() @ p_local_homo)[:3]
+                
+                # 计算到物体网格的最小距离
+                distance = self._compute_point_to_mesh_distance(p_world, object_mesh)
+                
+                # 施加惩罚：当距离小于 margin 时，惩罚强度随穿透深度增加
+                if distance < self.margin:
+                    penetration_depth = self.margin - distance
+                    # 使用二次惩罚函数
+                    penalty = penetration_depth ** 2
+                    total_energy += penalty
+        
+        return total_energy * self.weight
+    
+    def _compute_point_to_mesh_distance(self, point: jnp.ndarray, mesh) -> float:
+        """
+        计算点到网格的最小距离
+        
+        Args:
+            point: 世界坐标系中的点 [x, y, z] (JAX array)
+            mesh: pyvista.PolyData 或 trimesh.Trimesh 对象
+            
+        Returns:
+            最小距离（正值表示分离，负值表示穿透）
+        """
+        # 为了保持JAX兼容性，我们使用边界框距离
+        # 这是一个近似，但对于穿透避免已经足够
+        
+        if hasattr(mesh, 'bounds'):
+            # trimesh格式
+            bounds = jnp.array(mesh.bounds).reshape(3, 2)
+        elif hasattr(mesh, 'GetBounds'):
+            # pyvista格式
+            bounds = jnp.array(mesh.GetBounds()).reshape(3, 2)
+        else:
+            # 默认值，如果无法获取边界框
+            bounds = jnp.array([[-0.1, 0.1], [-0.1, 0.1], [-0.1, 0.1]])
+        
+        # 计算边界框中心和半尺寸
+        center = (bounds[:, 0] + bounds[:, 1]) / 2
+        half_size = (bounds[:, 1] - bounds[:, 0]) / 2
+        
+        # 计算点到边界框的距离
+        diff = point - center
+        dist_to_box = jnp.maximum(jnp.abs(diff) - half_size, 0)
+        distance = jnp.linalg.norm(dist_to_box)
+        
+        return distance
+    
+    def get_weight(self) -> float:
+        return self.weight
+
+
 class CollisionAvoidanceEnergy(EnergyFunction):
     """
     碰撞避免能量：惩罚手部与物体的碰撞
@@ -118,6 +236,99 @@ class CollisionAvoidanceEnergy(EnergyFunction):
         # 可以使用 pyroki.collision 模块
         return jnp.array(0.0)
     
+    def get_weight(self) -> float:
+        return self.weight
+
+
+class SelfCollisionAvoidanceEnergy(EnergyFunction):
+    """
+    自碰撞避免能量：防止手部各link之间的碰撞
+
+    使用球体集合来近似每个link的形状，计算球体间距离
+    """
+
+    def __init__(self, weight: float = 0.5, margin: float = 0.005,
+                 link_spheres: Dict[str, List[Tuple[np.ndarray, float]]] = None):
+        """
+        Args:
+            weight: 能量权重
+            margin: 安全距离（米）
+            link_spheres: {link_name: [(center, radius), ...]} 球体数据
+        """
+        self.weight = weight
+        self.margin = margin
+        self.link_spheres = link_spheres or {}
+
+    def set_link_spheres(self, link_spheres: Dict[str, List[Tuple[np.ndarray, float]]]):
+        """
+        设置link球体数据
+
+        Args:
+            link_spheres: {link_name: [(center, radius), ...]}
+        """
+        self.link_spheres = link_spheres
+
+    def compute(self, state, robot, **kwargs) -> jnp.ndarray:
+        """
+        计算自碰撞避免能量
+
+        计算所有link球体之间的距离，当距离小于安全阈值时施加惩罚
+        """
+        if not self.link_spheres:
+            return jnp.array(0.0)
+
+        total_energy = 0.0
+
+        # 1. 运行FK获取所有link位姿
+        link_poses_rel_root = robot.forward_kinematics(state.joint_values)
+        T_world_base = state.to_base_pose_se3()
+
+        # 2. 收集所有球体在世界坐标系中的位置
+        world_spheres = []  # [(center_world, radius, link_name), ...]
+
+        for link_name, spheres in self.link_spheres.items():
+            try:
+                link_idx = robot.links.names.index(link_name)
+            except ValueError:
+                continue  # 跳过不存在的link
+
+            # 获取link在世界坐标系中的位姿
+            T_root_link = jaxlie.SE3(link_poses_rel_root[link_idx])
+            T_world_link = T_world_base @ T_root_link
+            T_world_link_mat = T_world_link.as_matrix()
+
+            # 转换球体中心到世界坐标系
+            for center_local, radius in spheres:
+                center_local_homo = jnp.append(jnp.array(center_local), 1.0)
+                center_world = (T_world_link_mat @ center_local_homo)[:3]
+                world_spheres.append((center_world, radius, link_name))
+
+        # 3. 计算球体间距离并施加惩罚
+        num_spheres = len(world_spheres)
+        for i in range(num_spheres):
+            for j in range(i + 1, num_spheres):
+                center1, radius1, link1 = world_spheres[i]
+                center2, radius2, link2 = world_spheres[j]
+
+                # 跳过同一link内的球体（除非link有多个分离的部分）
+                if link1 == link2:
+                    continue
+
+                # 计算球心距离
+                distance = jnp.linalg.norm(center1 - center2)
+
+                # 计算最小安全距离
+                min_distance = radius1 + radius2 + self.margin
+
+                # 惩罚函数：当距离小于阈值时施加二次惩罚
+                if distance < min_distance:
+                    violation = min_distance - distance
+                    # 使用二次惩罚函数
+                    energy_penalty = violation ** 2
+                    total_energy += energy_penalty
+
+        return jnp.array(total_energy * self.weight)
+
     def get_weight(self) -> float:
         return self.weight
 
