@@ -17,14 +17,14 @@ from keyboard_controller import KeyboardController
 class MainWindow(QMainWindow):
     """
     应用程序的主窗口。
-    负责初始化所有UI组件和核心逻辑模块，并设置窗口布局。
+    负责初始化所有UI组件和核心逻辑模块，并设置窗口布局。 
     """
     
     def __init__(self, parent: QWidget | None = None, load_default: bool = False) -> None:
         super().__init__(parent)
         
         # 1. 初始化核心逻辑组件 (非UI)
-        self.init_core_components()
+        self.init_core_components() 
         
         # 2. 初始化UI组件和布局
         self.init_ui()
@@ -112,27 +112,29 @@ class MainWindow(QMainWindow):
         """
         print("连接信号与槽...")
 
-        # --- 流程 1a: 加载文件 ---
-        # 控件 (按钮) -> 数据管理器 (处理逻辑)
+        # --- 1. 加载物体和手 ---
         self.controls_widget.load_object_signal.connect(self.data_manager.load_object)
         self.controls_widget.load_hand_signal.connect(self.data_manager.load_hand)
 
-        # 数据管理器 (加载成功) -> 3D 视窗 (显示)
-        # 我们使用 lambda 函数来为 load_mesh 指定特定的 'name'
+        # --- 2. 当物体被加载进来时 ---
+        # --- 2.a 渲染视窗 ---
         self.data_manager.object_loaded_signal.connect(
             lambda mesh_data: self.view_left.load_mesh(mesh_data, name="object")
         )
         self.data_manager.object_loaded_signal.connect(
-            lambda mesh_data: self.view_center.load_mesh(mesh_data, name="object", opacity=0.5) # 物体在中间半透明
-        )
-        # 数据管理器 (加载成功) -> 优化线程 (设置物体网格用于穿透避免)
+            lambda mesh_data: self.view_center.load_mesh(mesh_data, name="object", opacity=0.5) 
+        )   # 中间视图的物体是半透明的
+
+        # --- 2.b 发送mesh到优化线程 ---
         self.data_manager.object_loaded_signal.connect(self.optimization_thread.set_object_mesh)
+
+        # --- 3. 当机械手被加载进来时，注意区分前缀 ---
         self.data_manager.hand_loaded_signal.connect(
-            lambda links_dict: self.view_right.load_hand(links_dict, name_prefix="static_hand_") # 右侧，静态（用于拾取）
+            lambda links_dict: self.view_right.load_hand(links_dict, name_prefix="static_hand_")
         )
         self.data_manager.hand_loaded_signal.connect(
-            lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_") # 中间，动态（优化更新）
-        )
+            lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_", opacity=0.5)
+        )  # 中间视图的手是半透明的
         self.data_manager.hand_initial_pose_signal.connect(self.on_hand_initial_pose_received)
 
         # --- 流程 1b: 将加载的数据连接到 UI 控件 ---

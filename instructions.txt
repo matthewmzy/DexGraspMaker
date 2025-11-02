@@ -1,0 +1,238 @@
+不管我说中文还是英文，请你始终说中文。
+我希望的功能是，在工具栏点击新增一对锚点，就在右侧窗口可以选择手上的点，并且可以多次选择取最后一次。拖拽时不判定为选点（这一点视难易决定做不做，不是最必要）。左侧窗口同理。不同的锚点对用不同的颜色表示。在工具栏显示锚点对时有一个可用鼠标轮盘滚动或边栏导航下拉的列表。
+请你先完成这些功能
+
+
+
+我确实已经正确的看到了锚点到达了我期待的位置。但是有几个有关可视化的bug需要你解决，还有一个UI需要你调整
+首先，当我在左右两侧都选择完一个锚点之后，应该有一个确定按钮，点下去才代表两个锚点更新在了锚点对列表里，随后就退出选锚点的状态直到下次点开始选择
+其次，每次新点击的时候都出现小红点，不如直接出现后面分配给这一对锚点的颜色
+第三，在中间的动态窗口里，当手已经开始优化到目标位置时，手上的锚点图示球还留在原地不动，应该跟着手动的
+第四，锚点对列表可以在“锚点配对”那个标签页下的右半部分，和其余内容呈左右排布
+
+左右排布你写的很对，怎么让左右两部分的初始宽度占比是3：2呢
+
+
+最后，运行过程中一直在打印这个错误：Traceback (most recent call last):
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 345, in on_pose_update_with_anchors
+    self.view_left.update_anchor_positions_fast(updated_pairs)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/vista_widget.py", line 279, in update_anchor_positions_fast
+    color = self.color_func(pair)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 264, in <lambda>
+    color_func = lambda pair: self.get_color_for_pair(anchor_pairs.index(pair))
+ValueError: {'hand_point': [-0.06411723784144459, 0.05801593006763636, -0.06072125144362356], 'hand_point_local': [np.float64(0.009655559930325266), np.float64(0.0010876519638115534), np.float64(0.025426874230410096)], 'hand_link_name': 'thdistal', 'obj_point': [np.float64(-0.03250749856170911), np.float64(0.03293057424042181), np.float64(-0.06783773860266096)], 'obj_point_local': [np.float64(-0.03250749856170911), np.float64(0.03293057424042181), np.float64(-0.06783773860266096)], 'enabled': True} is not in list
+
+
+
+事实上，你阅读代码可以发现我已经弃用了controls widget.py。而是改用controls widget v2.py。所以你可以直接刪掉controls widget.py而在controls widget v2.py里做改动
+
+
+
+
+
+解决运行./run.sh时报错：Traceback (most recent call last):
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 345, in on_pose_update_with_anchors
+    self.view_left.update_anchor_positions_fast(updated_pairs)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/vista_widget.py", line 279, in update_anchor_positions_fast
+    color = self.color_func(pair)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 264, in <lambda>
+    color_func = lambda pair: self.get_color_for_pair(anchor_pairs.index(pair))
+ValueError: {'hand_point': [-0.02046006237138175, 0.025251985461312527, -0.06716350904714007], 'hand_point_local': [np.float64(0.007723306017805822), np.float64(-0.0041383115927643155), np.float64(0.025159353514485144)], 'hand_link_name': 'thdistal', 'obj_point': [np.float64(-0.020460150605447737), np.float64(0.025254683120187263), np.float64(-0.06702913742505323)], 'obj_point_local': [np.float64(-0.020460150605447737), np.float64(0.025254683120187263), np.float64(-0.06702913742505323)], 'enabled': True} is not in list
+Traceback (most recent call last):
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 345, in on_pose_update_with_anchors
+    self.view_left.update_anchor_positions_fast(updated_pairs)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/vista_widget.py", line 279, in update_anchor_positions_fast
+    color = self.color_func(pair)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 264, in <lambda>
+    color_func = lambda pair: self.get_color_for_pair(anchor_pairs.index(pair))
+ValueError: {'hand_point': [-0.02046666402852919, 0.02524951738200271, -0.06715777623305398], 'hand_point_local': [np.float64(0.007723306017805822), np.float64(-0.0041383115927643155), np.float64(0.025159353514485144)], 'hand_link_name': 'thdistal', 'obj_point': [np.float64(-0.020460150605447737), np.float64(0.025254683120187263), np.float64(-0.06702913742505323)], 'obj_point_local': [np.float64(-0.020460150605447737), np.float64(0.025254683120187263), np.float64(-0.06702913742505323)], 'enabled': True} is not in list
+关闭应用程序...
+OptimizationThread: 线程已停止。
+再见。
+Traceback (most recent call last):
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 345, in on_pose_update_with_anchors
+    self.view_left.update_anchor_positions_fast(updated_pairs)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/vista_widget.py", line 279, in update_anchor_positions_fast
+    color = self.color_func(pair)
+  File "/home/ubuntu/Documents/DexGraspMaker/interactive_gripper_tool/main_window.py", line 264, in <lambda>
+    color_func = lambda pair: self.get_color_for_pair(anchor_pairs.index(pair))
+ValueError: {'hand_point': [-0.02047268230329852, 0.02524729183289528, -0.06714821943559436], 'hand_point_local': [np.float64(0.007723306017805822), np.float64(-0.0041383115927643155), np.float64(0.025159353514485144)], 'hand_link_name': 'thdistal', 'obj_point': [np.float64(-0.020460150605447737), np.float64(0.025254683120187263), np.float64(-0.06702913742505323)], 'obj_point_local': [np.float64(-0.020460150605447737), np.float64(0.025254683120187263), np.float64(-0.06702913742505323)], 'enabled': True} is not in list
+
+
+
+update_anchor_positions_fast 函数写的有问题。还是进行了删除和创建的操作，这和其注释里写的要求不符。怎么样加速球位置的改变的渲染？搜索官方文档找到最佳解决方案
+
+
+当我在左右两侧都选择完一个锚点之后，应该有一个确定按钮（和新增按钮相同的格式相同级别的布局），点下去才代表两个锚点更新在了锚点对列表里，随后就退出选锚点的状态直到下次点开始选择
+
+每次新点击的时候都出现的是小红点，不如直接出现后面分配给这一对锚点的颜色
+
+
+新增一个功能，在锚点列表栏的每一条目右侧有两个按钮，分别是调整物体锚点和调整手上锚点，点击按钮之后可以用WS控制点沿x轴方向移动1mm，AD表示y方向，空格和shift表示z轴方向。再次点击按钮结束键盘控制。可以新建一个脚本专门处理键盘操作
+
+现在请着手写再次点击取消调整状态的逻辑
+
+有两个错误。首先当点击调手上或者调物体之后，确实按钮变成了调整中。但是当我用键盘敲击一个指令之后，按钮马上变回了原来的，即使确实仍然在可调的状态，并且再次点击可以结束这种状态。但是显示的按钮是不对的。第二个，当我调整锚点之后，中间动态界面的手上的锚点仍然应该附着在手上，只是位置稍微沿手坐标系移动了一些。这里有一些需要调整的地方。因为这里点的记录方式是依附在的link上的相对位置，所以还需要算一下这个link想对于手坐标系的transform，然后把正确的1mm的微调换个方向作用在link坐标系下的相对位置。
+
+
+按钮的问题被很好的解决了，但是有关锚点微调一mm体现在中间的动图上也应该只是点相对于手移动了1mm这一点还是没有修复。我观察到每次调整锚点就不在手上了而是被transform到了一个较远的地方，显然这种transform是错的
+
+
+很正确！就该这样！唯一的不足是调整的时候左侧和右侧的静态展示图上的锚点都没有跟着动
+
+右侧手上的锚点我看到跟着动了，左侧的物体上的锚点没有显示在跟着动
+
+还是没有动
+
+最后一个小问题，当我在调手上时，点击调物体，调手上应该立即停止，反之亦然
+
+
+在关节调试选项卡里加上手的3维平移和旋转矩阵。加上控制优化开启与暂停的按钮。当手动调节任何一个关节值或评议旋转时暂停优化。添加导入手的姿态和导出手的姿态的按钮。这些所有的按钮出现在关节调试选项卡左侧，占40%，右侧60%是原来的滑动条
+
+
+
+
+每次我调节手的透明度的时候都很卡，是不是把所有的actor都刷新了一遍导致的呀？你搜一艘官方说明，有没有办法很快的更新透明度呢？
+
+物体是正常的，但是手我调透明度没有反应怎么回事
+
+
+
+出于鲁棒性考虑，当我点击添加新锚点对按钮时，按钮应该变一下色，表示正在添加。然后添加时也未必需要先点手上再点物体上，完全可以调换顺序，当两边都被点上就弹出确认添加。而且在添加中的状态下，无论我是两边都还没选，还是选了其中之一，还是两边都已经点选，当我点击变色之后的原来的添加新锚点对按钮之后就应该取消选择，并清空左中右三个窗口的相关球体
+
+你已经基本实现了我的需求。但是你的修改导致点击手或物体时临时球的颜色出现了错误。应该时刻保证新添加的这一组锚点就是按照候选颜色的顺序选的颜色，无论是临时锚点还是确定后的锚点。
+
+
+两个问题，第一，为什么我新选择一个锚点时原有的所有锚点都会闪烁一下。第二，当我点击了手上的锚点之后，选择取消添加，为什么所有的锚点都消失了，应该是只有我刚添加的那一个锚点消失。
+
+
+很好，之前的问题都被你解决了。新问题是：在左侧物体视角里能看到手的锚点，在右侧手的视图里也能看到物体上的锚点。我希望在优化过程中不仅中间动态试图的锚点会移动，左侧物体试图能不能也让手上的锚点相应移动。而右侧手视图中没必要出现物体上的锚点。
+
+
+左侧确实看到了正确的效果，不过右侧静态视图上的手上的锚点不应该移动啊！他还要依附在手表面上呢！不应该更新位置！是不是因为他们是同一个对象？请你先回答我这个问题我再告诉你怎么改
+
+
+就按你说的改成在右侧视图中使用静态锚点就好了
+
+
+解决了上个问题，有一个新问题：我一点击“调手上”按钮，右侧静态视图显示的锚点马上又变成显示动态锚点的位置了
+
+
+的确没有变成动态的位置。但是当我用键盘控制的时候静态视图里面的手上的锚点也应该跟着键盘指令移动呀！
+
+
+你改的不对！右侧试图确实跟着动了，但是不是在link的局部坐标系下朝指定方向移动1mm。你改复杂了。其实本来检测到键盘操作直接让静态锚点听从键盘操作改变local坐标并显示出来就可以了
+
+
+不对啊，你改完怎么我在调手上模式一按键盘就看不到静态手上的锚点了？
+
+
+并不是这个原因，而且你这样写导致每次我调所有锚点都会闪烁一下。请你更深入的检查下右侧静态视图里的锚点在什么时候会改变显示的位置？当我用键盘发指令之后能不能把静态锚点的位置正确设置并正确显示？
+
+
+
+
+请你仔细阅读这个项目，当已经存在几组锚点对时，当我在工具栏里点击“调手上”按钮之后会发生哪些事情？全部列出来。当我继续按几次‘w’键时，又会发生什么？你在其中看到了什么bug？
+
+
+那么请你再看，当我在上述模式下点了几次w，手部的锚点的位置会在所附着的link的局部坐标系下更新对吧？那右侧静态窗口里的锚点示意图的位置也是沿着所附着的link的局部坐标系下更新的吗？位置变动正确吗？渲染正确吗？为什么我发现原本在手上的点突然看不到了呢？
+
+你分析的很对，请你给出这部分修改后的代码
+
+
+帮我调整一下UI的布局吧。首先关节调试选项卡里面很不美观，我希望分成横向排列的三个竖栏：第一栏是优化控制和姿态管理，第二栏是平移和旋转的控制，第三栏是各关节角的控制不用变。其中第二栏请你去搜一艘官方教程，有没有什么非常直观的可以调整整个灵巧手平移和旋转的方式，比如一个可以拖动的球表示旋转等等，最直观最好交互的方式
+
+
+
+请你连接平移和旋转和关节角的信号，当优化时传过来的评议旋转和关节角都在控制台的滑动条进行更新，在控制台进行的修改也会立马体现在动态窗口视图中。总之我希望动态视图、实际数据（优化线程可以读到的、可以进行修改的）与控制台的滑动条三者是始终保持一致的，改变其中之一都要更新所有。
+
+
+
+很好，现在还有两点可以被优化。首先，初始时刻把手加载进来时，手有默认的各关节值，控制台上的滑动条应当与初始时一致。第二，默认优化控制是一直打开的。但是当我操控任何一个关节滑动条或者平移旋转时，优化控制就应当立即关闭，优化线程停止工作，直到我再次点击开始优化，此时优化线程先读取当前姿态，然后从当前姿态出发继续进行梯度下降。
+
+
+请你设计一个energy项避免手穿膜到物体里面去   
+
+看终端里的报错
+
+
+self.hand_key_points的指定非常依赖人工。我希望把每一款手的关键点保存在和其urdf同一路径下，在load hand的时候加载。若没有这个文件就创建这个文件，具体的方式就是在每个体积大于0的link上最远点采样（FPS）8个点。请你先写一个测试脚本可视化这种选取方式选到的点，我检查过后再整合入项目代码
+
+
+你能打印出shadow hand各个link的体积吗？
+换算成平方里厘米呢
+
+请你把首次加载手时自动计算keypoints算法根据mesh的体积进行阶梯式计算：体积在10立方厘米一下的link采样6个点，10到100立方厘米的采样8个点，100立方厘米到1000立方厘米的采样16个点，1000厘米及以上的采样32个点
+
+
+现在我想设计手的各link不能自碰撞的能量项。想法是把手的每一个link都用若干球来拟合。每个球有他的局部坐标和半径，这样在算惩罚项时就可以计算所有球在全局坐标系下的位置，然后两两计算距离，若小于两个球半径之和则做惩罚。现在请问有没有什么好用的用球拟合mesh的算法
+
+
+我想可视化看到你的球拟合shadow hand的效果
+
+你的球太大了！作为检测自碰撞的球，用来拟合的球原则上不能超出mesh体的约束，也即所有拟合球应当是限制在每个mesh内部的，而不应该有超出mesh的部分。请你思考你的算法是不是存在这个问题，然后改正
+
+
+现在项目的球拟合算法是完全错误的，生成的球很小，并不符合我想用来做手各关节不要互相穿膜的能量项的初衷。请你思考能用来拟合手每个link的mesh，从而计算两两之间球的距离和半径之和做对比就可以判断手各link之间有没有互相穿膜对球拟合算法的需求是什么样的
+
+
+你分析的完全正确！请你不要被当前的错误算法误导，按照你的分析写一个最优的球拟合算法以实现自碰撞检查！
+
+
+你生成的球还是太大了，我其实并不介意有微小自碰撞，但我不想出现的是每个关节必须离得太远。所以请你让球冗余部分最小，而不要求一定要把整个mesh包裹住。其实我更希望mesh把所有球包裹住。我允许mesh内部有些区域不被球覆盖，只是希望不要有球体超出mesh太多。请你修改你的算法   也即，我要最大内接球而不是最小外接球
+
+
+一个link可能有多个mesh，只需要挑最大的mesh，或者把这几个mesh加一起作为一个mesh。我希望看到的可视化是逐个link展示其拟合球而不是所有都堆在一起
+
+
+半径小但不要小于最短的bounding box边长
+
+
+有些link比较长，为什么没有多排列几个球？
+
+现在项目的球拟合算法是完全错误的,并不符合我想用来做手各关节不要互相穿膜的能量项的初衷。请你设计这样的算法：把一个link的所有mesh的bounding box找到然后计算组合在一起的最大bounding box。然后在这个bounding box里面以最短边的一半作为半径，根据比例沿最长边居中尽可能多的放球，
+
+
+写一个可视化球拟合效果的脚本。加载shadow hand，根据URDF计算一下每个link FK之后的全局坐标，然后把整个手搭建起来，然后再把球也加进去
+
+
+总体来说还是很正确的。只是你需要稍微改一下放球的方式：先计算沿最长边最多能放下几个球，球之间不要相撞，也不要超出边界。放球的时候一定要保证这些球总体沿最长边居中，例如：一个球就放中间，两个球就应该对称放。可视化的时候球完全不透明手半透明
+
+
+很好，就按照现在的球拟合方式。再加一步：从跟节点开始树型检查：检查一个父节点时检查所有来自其子节点的球，如果发生了父节点和子节点中的球碰撞，则删掉子节点中与父节点碰撞的那个球
+
+可视化看到的是完全正确的球拟合！请你在首次加载一款手时进行球拟合计算，并把球拟合结果保存在urdf相同目录下，下次加载这一款手时检查有没有这个球拟合文件，如果有直接加载不再计算。计算方式请务必和我可视化看到的效果一样！
+
+
+
+现在你可以看到test_assets/shadow目录下既有urdf，又有关键点和拟合球。请你写一个ipynb专门用于可视化一个手的FK之后的mesh和其上的关键点、拟合球
+
+
+
+这个ipynb的依赖太多太难配。你只需要用open3d或者trimesh做可视化就可以，不用vista
+
+
+为什么我运行也不报错但是不显示？
+
+
+
+算了算了，ipynb太麻烦了，你还是写成一个python脚本吧，进行所有可视化
+
+
+不要用matplotlib，我喜欢open3d。另外不同link没必要用不同颜色，半透明的浅蓝色就好。点和球要不透明
+
+link确实都fk到了正确的位置，怎么球和keypoints没有fk而是全堆在base坐标系下的原点？不应该出现在link局部坐标系吗？
+
+有了这个脚本是不是有一些脚本就可以删掉了？
+
+
+为什么一开始进行优化，中间的动态窗口里的手上的锚点就不紧贴着手移动了？而是产生了错位？锚点是始终存在于某一个link的某一个局部坐标点的，这个在手动的时候锚点不可能会相对于所附着的link发生偏移呀？请你检查为什么会产生偏移
+
+
+请你阅读每一个脚本，思考在功能完全不变的情况下，怎么写更加符合规范、简洁、逻辑清晰，并用充足良好的中文对代码进行注释。保证整个项目代码易读易管理。再次强调请务必保证你的代码不会破坏项目的正确运行！
+
+
+请你在代码中应用这些改动，并合理拆分函数或脚本
+
+
+为什么现在我选择完一组锚点并点击确定之后不触发优化了？
