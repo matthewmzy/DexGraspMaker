@@ -284,40 +284,10 @@ class DataManager(QObject):
             print(f"DataManager: 已提取 {len(self.hand_links_mesh_dict)} 个 link meshes。")
             self.hand_loaded_signal.emit(self.hand_links_mesh_dict)
 
-            # 4. 提取 Joint 信息 (用于 ControlsWidget 滑块)
-            self.joint_info.clear()
-            pyroki_joints = self.pyroki_robot.joints
-            
-            # pyroki.joints.lower_limits/upper_limits 已经是被驱动关节的列表
-            # 我们需要从 yourdfpy 中获取它们的名字以保持一致
-            actuated_names = self.urdf_obj.actuated_joint_names
-
-            if len(actuated_names) != pyroki_joints.num_actuated_joints:
-                print(f"DataManager: 警告: 'yourdfpy' ({len(actuated_names)} joints) 和 'pyroki' ({pyroki_joints.num_actuated_joints} joints) 的驱动关节数量不匹配。")
-                # 这种情况不应该发生，但作为后备
-                if pyroki_joints.num_actuated_joints > 0:
-                     actuated_names = [f"joint_{i}" for i in range(pyroki_joints.num_actuated_joints)]
-                else:
-                    raise ValueError("未找到驱动关节。")
-
-            for i, joint_name in enumerate(actuated_names):
-                lower = float(pyroki_joints.lower_limits[i])
-                upper = float(pyroki_joints.upper_limits[i])
-                info = {
-                    'name': joint_name,
-                    'min': lower,
-                    'max': upper,
-                    'default': (lower + upper) / 2.0
-                }
-                self.joint_info.append(info)
-
-            print(f"DataManager: 已提取 {len(self.joint_info)} 个可动关节信息。")
-            self.hand_joint_info_signal.emit(self.joint_info)
-            
             # 5. 发射 JAX-native robot
             self.pyroki_robot_loaded_signal.emit(self.pyroki_robot)
 
-            # 6. 计算并
+            # 4. 计算并
             print("DataManager: 正在计算初始姿态 (Default FK)...")
             initial_poses = {}
             base_link_name = self.urdf_obj.base_link
@@ -341,10 +311,10 @@ class DataManager(QObject):
             # 发射初始姿态
             self.hand_initial_pose_signal.emit(initial_poses)
 
-            # 7. 生成或加载关键点
+            # 5. 生成或加载关键点
             self._generate_or_load_keypoints(file_path)
 
-            # 8. 生成或加载link球体
+            # 6. 生成或加载link球体
             self._generate_or_load_link_spheres(file_path)
             
             self.status_message_signal.emit(f"已加载机械手: {file_path}")

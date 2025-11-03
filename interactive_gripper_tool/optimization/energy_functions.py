@@ -12,6 +12,10 @@ import jaxlie
 import numpy as np
 from typing import List, Dict, Tuple
 from abc import ABC, abstractmethod
+import trimesh
+import trimesh.proximity
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 
 
 class EnergyFunction(ABC):
@@ -97,21 +101,32 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
     """
     穿透避免能量：防止手部穿透到物体内部
     
-    计算手部关键点到物体网格的最小距离，当距离为负时施加惩罚
+    使用预计算的距离场实现精确的穿透检测
     """
     
-    def __init__(self, weight: float = 1.0, margin: float = 0.005, 
-                 hand_key_points: Dict[str, np.ndarray] = None):
+    def __init__(self, weight: float = 1.0, margin: float = 0.001, 
+                 hand_key_points: Dict[str, np.ndarray] = None,
+                 resolution: float = 0.002):  # 2mm分辨率
         """
         Args:
             weight: 能量权重
             margin: 安全距离（米），距离小于此值时开始施加惩罚
             hand_key_points: 手部关键点字典 {link_name: points_array}
-                如果为None，则需要通过set_key_points()方法设置
+            resolution: 距离场分辨率（米）
         """
         self.weight = weight
         self.margin = margin
         self.hand_key_points = hand_key_points
+        self.resolution = resolution
+        
+        # 距离场数据
+        self.distance_field = None
+        self.field_bounds = None
+        self.field_shape = None
+        
+        # 可视化标志
+        self._visualized = False
+        self._pending_visualization_data = None
     
     def set_key_points(self, key_points: Dict[str, np.ndarray]):
         """
@@ -122,14 +137,290 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
         """
         self.hand_key_points = key_points
     
+    def precompute_distance_field(self, mesh):
+        """
+        预计算物体的距离场
+        
+        Args:
+            mesh: trimesh.Trimesh 或 pyvista.PolyData 对象
+        """
+        if mesh is None:
+            return
+        
+        # 转换为trimesh格式
+        if isinstance(mesh, trimesh.Trimesh):
+            # 已经是trimesh格式
+            tri_mesh = mesh
+        else:
+            # 转换为trimesh
+            import pyvista as pv
+            if isinstance(mesh, pv.PolyData):
+                # 从pyvista转换为trimesh
+                vertices = mesh.points
+                faces = mesh.faces.reshape(-1, 4)[:, 1:]  # 移除面的顶点数
+                tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+            else:
+                print("PenetrationAvoidanceEnergy: 不支持的网格格式")
+                return
+        
+        # 获取边界框
+        bounds = tri_mesh.bounds
+        # 确保bounds是numpy数组
+        if not isinstance(bounds, np.ndarray):
+            bounds = np.array(bounds)
+        
+        # 如果bounds是扁平化的 (6,) 数组，重新构造为 (2, 3)
+        if bounds.shape == (6,):
+            bounds = bounds.reshape(2, 3)
+        
+        self.field_bounds = bounds  # 直接保存numpy数组
+        
+        # 计算网格尺寸 - 使用更紧致的边界框
+        size = bounds[1] - bounds[0]
+        max_size = np.max(size)
+        
+        # 创建3D网格，只在物体边界框内，添加小padding
+        padding = max_size * 0.05  # 5% padding而不是10%
+        grid_bounds = np.array([
+            bounds[0] - padding,
+            bounds[1] + padding
+        ])
+        
+        # 计算网格分辨率
+        grid_size = grid_bounds[1] - grid_bounds[0]
+        num_cells = np.maximum(5, np.ceil(grid_size / self.resolution).astype(int))  # 至少5个单元
+        
+        # 限制最大网格尺寸以避免内存溢出 - 更保守的限制
+        max_cells_per_dim = 30  # 从100降低到30
+        num_cells = np.minimum(num_cells, max_cells_per_dim)
+        
+        # 确保num_cells是数组
+        if np.isscalar(num_cells):
+            num_cells = np.array([num_cells, num_cells, num_cells])
+        
+        self.field_shape = tuple(num_cells)
+        
+        print(f"PenetrationAvoidanceEnergy: 预计算距离场，网格大小: {self.field_shape}, 边界框: {grid_bounds}")
+        
+        # 生成查询点
+        x = np.linspace(grid_bounds[0, 0], grid_bounds[1, 0], num_cells[0])
+        y = np.linspace(grid_bounds[0, 1], grid_bounds[1, 1], num_cells[1])
+        z = np.linspace(grid_bounds[0, 2], grid_bounds[1, 2], num_cells[2])
+        
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+        query_points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+        
+        # 计算距离场
+        signed_distances = trimesh.proximity.signed_distance(tri_mesh, query_points)
+        
+        # 重塑为3D数组
+        self.distance_field = signed_distances.reshape(self.field_shape)
+        
+        print(f"PenetrationAvoidanceEnergy: 距离场预计算完成，范围: [{signed_distances.min():.4f}, {signed_distances.max():.4f}]")
+    
+    def _query_distance_field(self, points: jnp.ndarray) -> jnp.ndarray:
+        """
+        查询距离场中的距离值
+        
+        Args:
+            points: (N, 3) 世界坐标系中的点
+            
+        Returns:
+            (N,) 带符号距离数组
+        """
+        if self.distance_field is None or self.field_bounds is None:
+            # 如果没有距离场，返回0（无惩罚）
+            return jnp.zeros(points.shape[0])
+        
+        # 将世界坐标转换为网格索引
+        bounds_min = jnp.array(self.field_bounds[0])
+        bounds_size = jnp.array(self.field_bounds[1] - self.field_bounds[0])
+        grid_shape = jnp.array(self.field_shape)
+        
+        # 归一化坐标 [0, 1]
+        normalized_coords = (points - bounds_min) / bounds_size
+        
+        # 转换为网格索引
+        grid_coords = normalized_coords * (grid_shape - 1)
+        
+        # 三线性插值
+        distances = self._trilinear_interpolate(grid_coords)
+        
+        return distances
+    
+    def _trilinear_interpolate(self, coords: jnp.ndarray) -> jnp.ndarray:
+        """
+        三线性插值查询距离场
+        
+        Args:
+            coords: (N, 3) 网格坐标
+            
+        Returns:
+            (N,) 插值后的距离值
+        """
+        # 获取整数和分数部分
+        coords_floor = jnp.floor(coords).astype(jnp.int32)
+        coords_frac = coords - coords_floor
+        
+        # 确保坐标在有效范围内
+        grid_shape = jnp.array(self.field_shape)
+        coords_floor = jnp.clip(coords_floor, 0, grid_shape - 2)
+        
+        # 获取8个角点的值
+        c000 = self._get_field_value(coords_floor[:, 0], coords_floor[:, 1], coords_floor[:, 2])
+        c001 = self._get_field_value(coords_floor[:, 0], coords_floor[:, 1], coords_floor[:, 2] + 1)
+        c010 = self._get_field_value(coords_floor[:, 0], coords_floor[:, 1] + 1, coords_floor[:, 2])
+        c011 = self._get_field_value(coords_floor[:, 0], coords_floor[:, 1] + 1, coords_floor[:, 2] + 1)
+        c100 = self._get_field_value(coords_floor[:, 0] + 1, coords_floor[:, 1], coords_floor[:, 2])
+        c101 = self._get_field_value(coords_floor[:, 0] + 1, coords_floor[:, 1], coords_floor[:, 2] + 1)
+        c110 = self._get_field_value(coords_floor[:, 0] + 1, coords_floor[:, 1] + 1, coords_floor[:, 2])
+        c111 = self._get_field_value(coords_floor[:, 0] + 1, coords_floor[:, 1] + 1, coords_floor[:, 2] + 1)
+        
+        # 三线性插值
+        x, y, z = coords_frac[:, 0], coords_frac[:, 1], coords_frac[:, 2]
+        
+        c00 = c000 * (1 - x) + c100 * x
+        c01 = c001 * (1 - x) + c101 * x
+        c10 = c010 * (1 - x) + c110 * x
+        c11 = c011 * (1 - x) + c111 * x
+        
+        c0 = c00 * (1 - y) + c10 * y
+        c1 = c01 * (1 - y) + c11 * y
+        
+        return c0 * (1 - z) + c1 * z
+    
+    def _get_field_value(self, x: jnp.ndarray, y: jnp.ndarray, z: jnp.ndarray) -> jnp.ndarray:
+        """
+        获取距离场中的值（向量化）
+        
+        Args:
+            x, y, z: 整数坐标数组
+            
+        Returns:
+            对应的距离值数组
+        """
+        # 将numpy数组转换为JAX数组
+        field = jnp.array(self.distance_field)
+        
+        # 使用高级索引获取值
+        return field[x, y, z]
+    
+    def _visualize_keypoints_and_mesh(self, mesh, key_points_world: jnp.ndarray, distances: jnp.ndarray):
+        """
+        可视化物体mesh和关键点位置
+        
+        Args:
+            mesh: trimesh.Trimesh对象
+            key_points_world: (N, 3) 世界坐标系中的关键点
+            distances: (N,) 对应的距离值
+        """
+        if self._visualized:
+            return
+        
+        self._visualized = True
+        
+        print("PenetrationAvoidanceEnergy: 显示关键点和物体可视化...")
+        
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        
+        # 显示物体mesh
+        if mesh is not None:
+            try:
+                # 使用trimesh的plot功能，但这里我们用简单的散点图近似
+                # 为了简单，我们只显示边界框
+                raw_bounds = mesh.bounds
+                print(f"raw_bounds: {raw_bounds}, type: {type(raw_bounds)}")
+                bounds = np.array(mesh.bounds)
+                print(f"bounds after np.array: {bounds}, shape: {bounds.shape}, ndim: {bounds.ndim}")
+                
+                # 确保bounds是正确的形状
+                if bounds.ndim == 1 and len(bounds) == 6:
+                    # BoundsTuple顺序: x_min, x_max, y_min, y_max, z_min, z_max
+                    x_min, x_max, y_min, y_max, z_min, z_max = bounds
+                    bounds = np.array([
+                        [x_min, y_min, z_min],
+                        [x_max, y_max, z_max]
+                    ])
+                    print(f"bounds after correct reshape: {bounds}, shape: {bounds.shape}")
+                
+                ax.set_xlim(bounds[0, 0], bounds[1, 0])
+                ax.set_ylim(bounds[0, 1], bounds[1, 1])
+                ax.set_zlim(bounds[0, 2], bounds[1, 2])
+                
+                # 添加边界框线条
+                from mpl_toolkits.mplot3d.art3d import Line3DCollection
+                edges = [
+                    [(bounds[0, 0], bounds[0, 1], bounds[0, 2]), (bounds[1, 0], bounds[0, 1], bounds[0, 2])],
+                    [(bounds[0, 0], bounds[0, 1], bounds[0, 2]), (bounds[0, 0], bounds[1, 1], bounds[0, 2])],
+                    [(bounds[0, 0], bounds[0, 1], bounds[0, 2]), (bounds[0, 0], bounds[0, 1], bounds[1, 2])],
+                    [(bounds[1, 0], bounds[1, 1], bounds[1, 2]), (bounds[0, 0], bounds[1, 1], bounds[1, 2])],
+                    [(bounds[1, 0], bounds[1, 1], bounds[1, 2]), (bounds[1, 0], bounds[0, 1], bounds[1, 2])],
+                    [(bounds[1, 0], bounds[1, 1], bounds[1, 2]), (bounds[1, 0], bounds[1, 1], bounds[0, 2])],
+                    [(bounds[1, 0], bounds[0, 1], bounds[0, 2]), (bounds[1, 0], bounds[1, 1], bounds[0, 2])],
+                    [(bounds[1, 0], bounds[0, 1], bounds[0, 2]), (bounds[1, 0], bounds[0, 1], bounds[1, 2])],
+                    [(bounds[0, 0], bounds[1, 1], bounds[0, 2]), (bounds[1, 0], bounds[1, 1], bounds[0, 2])],
+                    [(bounds[0, 0], bounds[1, 1], bounds[0, 2]), (bounds[0, 0], bounds[1, 1], bounds[1, 2])],
+                    [(bounds[0, 0], bounds[0, 1], bounds[1, 2]), (bounds[1, 0], bounds[0, 1], bounds[1, 2])],
+                    [(bounds[0, 0], bounds[0, 1], bounds[1, 2]), (bounds[0, 0], bounds[1, 1], bounds[1, 2])],
+                ]
+                ax.add_collection3d(Line3DCollection(edges, colors='black', alpha=0.3))
+            except Exception as e:
+                print(f"可视化边界框失败: {e}")
+                # 设置默认范围
+                ax.set_xlim(-0.1, 0.1)
+                ax.set_ylim(-0.1, 0.1)
+                ax.set_zlim(-0.1, 0.1)
+        
+        # 显示关键点
+        points_np = np.array(key_points_world)
+        distances_np = np.array(distances)
+        
+        # 根据距离着色：红色=穿透(距离>0), 蓝色=外部(距离<=0)
+        colors = np.where(distances_np > 0, 'red', 'blue')
+        
+        scatter = ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
+                           c=colors, s=50, alpha=0.8)
+        
+        # 添加图例
+        ax.scatter([], [], c='red', label='Inside (Penetrating)', s=50)
+        ax.scatter([], [], c='blue', label='Outside', s=50)
+        ax.legend()
+        
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_zlabel('Z (m)')
+        ax.set_title(f'Hand Keypoints vs Object Mesh\n{len(points_np)} keypoints, {np.sum(distances_np > 0)} penetrating')
+        
+        # 打印统计信息
+        print(f"关键点统计:")
+        print(f"  总数: {len(points_np)}")
+        print(f"  穿透点: {np.sum(distances_np > 0)}")
+        print(f"  外部点: {np.sum(distances_np <= 0)}")
+        if np.any(distances_np > 0):
+            print(f"  最大穿透深度: {distances_np.max():.4f}m")
+        
+        plt.tight_layout()
+        plt.savefig('/home/ubuntu/Documents/DexGraspMaker/keypoints_visualization.png', dpi=150, bbox_inches='tight')
+        print("可视化已保存到: keypoints_visualization.png")
+        plt.show()
+    
     def compute(self, state, robot, object_mesh=None, **kwargs) -> jnp.ndarray:
         """
         计算穿透避免能量
         
         Args:
-            object_mesh: 物体网格 (pyvista.PolyData 或 trimesh.Trimesh)
+            object_mesh: 物体网格 (用于预计算距离场，如果还没有的话)
         """
-        if object_mesh is None or self.hand_key_points is None:
+        if self.hand_key_points is None:
+            return jnp.array(0.0)
+        
+        # 如果还没有距离场，尝试预计算
+        if self.distance_field is None and object_mesh is not None:
+            self.precompute_distance_field(object_mesh)
+        
+        # 如果仍然没有距离场，返回0
+        if self.distance_field is None:
             return jnp.array(0.0)
         
         total_energy = 0.0
@@ -138,7 +429,10 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
         link_poses_rel_root = robot.forward_kinematics(state.joint_values)
         T_world_base = state.to_base_pose_se3()
         
-        # 2. 对每个link的关键点计算到物体的距离
+        # 收集所有关键点
+        all_points_world = []
+        
+        # 2. 对每个link的关键点计算距离
         for link_name, key_points in self.hand_key_points.items():
             # 查找 link 索引
             try:
@@ -150,61 +444,49 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
             # 获取 link 在世界坐标系中的位姿
             T_root_link = jaxlie.SE3(link_poses_rel_root[link_idx])
             T_world_link = T_world_base @ T_root_link
+            T_world_link_mat = T_world_link.as_matrix()
             
-            # 对每个关键点计算距离
+            # 转换关键点到世界坐标系
             for p_local in key_points:
                 p_local = jnp.array(p_local)
                 
                 # 将局部坐标转换为世界坐标
                 p_local_homo = jnp.append(p_local, 1.0)
-                p_world = (T_world_link.as_matrix() @ p_local_homo)[:3]
-                
-                # 计算到物体网格的最小距离
-                distance = self._compute_point_to_mesh_distance(p_world, object_mesh)
-                
-                # 施加惩罚：当距离小于 margin 时，惩罚强度随穿透深度增加
-                if distance < self.margin:
-                    penetration_depth = self.margin - distance
-                    # 使用二次惩罚函数
-                    penalty = penetration_depth ** 2
-                    total_energy += penalty
+                p_world = (T_world_link_mat @ p_local_homo)[:3]
+                all_points_world.append(p_world)
+        
+        if not all_points_world:
+            return jnp.array(0.0)
+        
+        # 批量查询距离
+        points_array = jnp.stack(all_points_world)
+        distances = self._query_distance_field(points_array)
+        
+        # 只惩罚穿模点（距离 > 0的点）：穿模距离的总和
+        # 距离 > 0 表示在物体内部，值为穿透深度
+        penetration_depths = jnp.maximum(0.0, distances)
+        
+        # 直接使用穿透距离的总和作为能量（不使用二次惩罚）
+        total_energy = jnp.sum(penetration_depths)
+        
+        # 如果还没有可视化，设置待可视化数据
+        if not self._visualized and len(all_points_world) > 0:
+            self._pending_visualization_data = {
+                'points': points_array,
+                'distances': distances,
+                'object_mesh': object_mesh
+            }
         
         return total_energy * self.weight
     
-    def _compute_point_to_mesh_distance(self, point: jnp.ndarray, mesh) -> float:
-        """
-        计算点到网格的最小距离
-        
-        Args:
-            point: 世界坐标系中的点 [x, y, z] (JAX array)
-            mesh: pyvista.PolyData 或 trimesh.Trimesh 对象
-            
-        Returns:
-            最小距离（正值表示分离，负值表示穿透）
-        """
-        # 为了保持JAX兼容性，我们使用边界框距离
-        # 这是一个近似，但对于穿透避免已经足够
-        
-        if hasattr(mesh, 'bounds'):
-            # trimesh格式
-            bounds = jnp.array(mesh.bounds).reshape(3, 2)
-        elif hasattr(mesh, 'GetBounds'):
-            # pyvista格式
-            bounds = jnp.array(mesh.GetBounds()).reshape(3, 2)
-        else:
-            # 默认值，如果无法获取边界框
-            bounds = jnp.array([[-0.1, 0.1], [-0.1, 0.1], [-0.1, 0.1]])
-        
-        # 计算边界框中心和半尺寸
-        center = (bounds[:, 0] + bounds[:, 1]) / 2
-        half_size = (bounds[:, 1] - bounds[:, 0]) / 2
-        
-        # 计算点到边界框的距离
-        diff = point - center
-        dist_to_box = jnp.maximum(jnp.abs(diff) - half_size, 0)
-        distance = jnp.linalg.norm(dist_to_box)
-        
-        return distance
+    def get_pending_visualization_data(self):
+        """获取待可视化的数据，如果有的话"""
+        if self._pending_visualization_data is not None:
+            data = self._pending_visualization_data
+            self._pending_visualization_data = None
+            self._visualized = True
+            return data
+        return None
     
     def get_weight(self) -> float:
         return self.weight

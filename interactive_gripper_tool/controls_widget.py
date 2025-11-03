@@ -794,12 +794,15 @@ class ControlsWidget(QWidget):
         self.update_anchor_position_signal.emit(anchor_index, point_type, position)
 
     @pyqtSlot(list)
-    def populate_joint_controls(self, joint_info_list: list) -> None:
+    def create_joint_controls(self, joint_info_list: list) -> None:
         """
         根据机械手的关节信息，动态生成关节控制滑块
         
         :param joint_info_list: 列表，每个元素是一个字典:
-                                {'name': str, 'min': float, 'max': float, 'default': float}
+                                {'name': str, 
+                                 'min': float, 
+                                 'max': float, 
+                                 'default': float}
         """
         # 清除占位符
         self.joints_placeholder_label.setParent(None)
@@ -855,6 +858,13 @@ class ControlsWidget(QWidget):
                 'slider': slider,
                 'spinbox': spinbox
             }
+
+        # 按照default值对机械手进行FK
+        default_joint_values = {
+            joint_info['name']: joint_info.get('default', 0.0)
+            for joint_info in joint_info_list
+        }
+        self.update_joint_controls(default_joint_values)
 
     def get_anchor_color(self, index: int) -> tuple:
         """
@@ -930,9 +940,6 @@ class ControlsWidget(QWidget):
         """
         if self.is_adding_anchor:
             self._cancel_adding_anchor()
-    
-    # 向后兼容：create_joint_controls 是 populate_joint_controls 的别名
-    create_joint_controls = populate_joint_controls
 
     # --- 关节调试相关的槽函数 ---
 

@@ -129,25 +129,24 @@ class MainWindow(QMainWindow):
         self.data_manager.object_loaded_signal.connect(self.optimization_thread.set_object_mesh)
 
         # --- 3. 当机械手被加载进来时，注意区分前缀 ---
+        # --- 3.a 渲染视窗 ---
         self.data_manager.hand_loaded_signal.connect(
             lambda links_dict: self.view_right.load_hand(links_dict, name_prefix="static_hand_")
         )
         self.data_manager.hand_loaded_signal.connect(
             lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_", opacity=0.5)
         )  # 中间视图的手是半透明的
-        self.data_manager.hand_initial_pose_signal.connect(self.on_hand_initial_pose_received)
 
-        # --- 流程 1b: 将加载的数据连接到 UI 控件 ---
-        # DataManager (加载成功) -> ControlsWidget (更新UI)
-        self.data_manager.anchor_list_updated_signal.connect(self.controls_widget.update_anchor_list)
-        self.data_manager.hand_joint_info_signal.connect(self.controls_widget.create_joint_controls)
-        
-        # --- 流程 1c: 将 JAX Robot 模型发送到后端 ---
+        # --- 3.b 接收初始姿态及实时关节信息 ---
+        self.data_manager.hand_initial_pose_signal.connect(self.on_hand_initial_pose_received)
+        self.optimization_thread.joint_info_signal.connect(self.controls_widget.create_joint_controls)
+
+        # --- 3.c 将 JAX Robot 模型发送到后端优化线程 ---
         self.data_manager.pyroki_robot_loaded_signal.connect(self.optimization_thread.set_pyroki_robot)
         self.data_manager.hand_keypoints_loaded_signal.connect(self.optimization_thread.set_hand_keypoints)
         self.data_manager.hand_link_spheres_loaded_signal.connect(self.optimization_thread.set_link_spheres)
 
-        # --- 流程 2: 锚点拾取（新版工作流）---
+        # --- 4. 锚点拾取 ---
         # 控件 (添加锚点对按钮) -> 数据管理器 (激活拾取)
         self.controls_widget.add_anchor_pair_signal.connect(
             lambda: self.data_manager.set_picking_mode(True)
@@ -168,6 +167,11 @@ class MainWindow(QMainWindow):
         
         # 数据管理器 (锚点对准备状态) -> 控件 (显示/隐藏确定按钮)
         self.data_manager.anchor_pair_ready_signal.connect(self.controls_widget.show_confirm_button)
+
+        # 数据管理器 (锚点列表更新) -> 控件 (刷新锚点列表)
+        self.data_manager.anchor_list_updated_signal.connect(self.controls_widget.update_anchor_list)
+        # 数据管理器 (锚点列表更新) -> 主窗口 (更新所有视窗的锚点显示)
+        self.data_manager.anchor_list_updated_signal.connect(self.on_anchor_list_updated)
         
         # 数据管理器 (清空临时锚点) -> 3D 视窗 (清空球体)
         self.data_manager.clear_temp_anchors_signal.connect(self._clear_temp_anchors)
@@ -206,15 +210,15 @@ class MainWindow(QMainWindow):
         # 键盘控制器 (状态变化) -> 控件 (更新按钮状态)
         self.keyboard_controller.control_state_changed_signal.connect(self.controls_widget.update_anchor_adjust_button_state)
 
-        # --- 流程 3: 触发优化 ---
+        # --- 5. 触发优化 ---
         # 数据管理器 (凑成一对) -> 优化线程 (开始计算)
         self.data_manager.new_anchor_pair_signal.connect(self.optimization_thread.trigger_optimization)
 
-        # --- 流程 4: 实时更新 ---
+        # --- 6. 实时更新 ---
         # 优化线程 (计算出新位姿) -> 主窗口 (更新渲染和锚点)
         self.optimization_thread.pose_update_signal.connect(self.on_pose_update_with_anchors)
 
-        # --- 流程 5: 可视化设置 ---
+        # --- 7. 可视化设置 ---
         # 控件 (滑块/颜色) -> 中心视窗 (更新渲染)
         self.controls_widget.visualization_settings_changed_signal.connect(self.on_visualization_changed)
         
@@ -223,27 +227,24 @@ class MainWindow(QMainWindow):
             lambda settings: self.on_anchor_list_updated(self.data_manager.anchor_pairs)
         )
 
-        # --- 流程 6: 手动关节控制 ---
+        # --- 8. 手动关节控制 ---
         # 控件 (滑块) -> 优化线程 (设置关节值并计算FK)
         # (优化线程将通过 pose_update_signal 发出新位姿)
         self.controls_widget.manual_joint_changed_signal.connect(self.optimization_thread.set_manual_joint)
         self.controls_widget.base_translation_changed_signal.connect(self.optimization_thread.set_base_translation)
         self.controls_widget.base_rotation_changed_signal.connect(self.optimization_thread.set_base_rotation)
         
-        # --- 流程 6.5: 状态同步 ---
+        # --- 9. 状态同步，从优化线程 ---
         self.optimization_thread.base_pose_updated_signal.connect(self.on_base_pose_updated)
         self.optimization_thread.joint_values_updated_signal.connect(self.controls_widget.update_joint_controls)
 
-        # --- 流程 7: 优化控制 ---
+        # --- 10. 优化控制 ---
         self.controls_widget.optimization_toggle_signal.connect(self.on_optimization_toggle)
         
-        # --- 流程 8: 姿态导入/导出 ---
+        # --- 11. 姿态导入/导出 ---
         self.controls_widget.import_pose_signal.connect(self.data_manager.import_hand_pose)
         self.controls_widget.export_pose_signal.connect(self.data_manager.export_hand_pose)
-        
-        # --- 流程 9: 锚点可视化 ---
-        # 数据管理器 (锚点列表更新) -> 主窗口 (更新所有视窗的锚点显示)
-        self.data_manager.anchor_list_updated_signal.connect(self.on_anchor_list_updated)
+    
         
         print("信号连接完成。")
 

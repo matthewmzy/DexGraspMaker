@@ -36,6 +36,7 @@ class OptimizationThread(QThread):
     pose_update_signal = pyqtSignal(dict)
     base_pose_updated_signal = pyqtSignal(list, list)
     joint_values_updated_signal = pyqtSignal(dict)
+    joint_info_signal = pyqtSignal(list)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -113,7 +114,7 @@ class OptimizationThread(QThread):
         # 创建能量函数
         anchor_energy = AnchorPointEnergy(weight=1.0)
         joint_limit_energy = JointLimitEnergy(weight=0.5, margin=0.1)
-        penetration_energy = PenetrationAvoidanceEnergy(weight=0.5, margin=0.005)
+        penetration_energy = PenetrationAvoidanceEnergy(weight=2.0, margin=0.0)  # 直接使用穿透距离
         self_collision_energy = SelfCollisionAvoidanceEnergy(weight=0.3, margin=0.005)
         # collision_energy = CollisionAvoidanceEnergy(weight=0.1, margin=0.01)
         
@@ -256,6 +257,9 @@ class OptimizationThread(QThread):
             self.base_pose_updated_signal.emit(base_translation, base_rotation)
             self.joint_values_updated_signal.emit(joint_snapshot)
             
+            # 检查是否有待可视化的数据
+            self._check_and_perform_visualization()
+            
             # 休息 16ms (~60 FPS) 以产生平滑的动画效果
             # 并防止 CPU 100% 占用
             self.msleep(16)
@@ -291,6 +295,14 @@ class OptimizationThread(QThread):
         """
         with QMutexLocker(self.mutex):
             self.object_mesh = mesh
+            
+            # 预计算距离场用于精确的穿透检测
+            if hasattr(self.energy_function, 'energy_functions'):
+                for energy in self.energy_function.energy_functions:
+                    if isinstance(energy, PenetrationAvoidanceEnergy):
+                        energy.precompute_distance_field(mesh)
+                        break
+            
             print(f"OptimizationThread: 设置了物体网格，顶点数: {len(mesh.points) if hasattr(mesh, 'points') else '未知'}")
     
     def set_pyroki_robot(self, robot: pk.Robot) -> None:
@@ -315,13 +327,32 @@ class OptimizationThread(QThread):
                 joint_names = self.robot.joints.actuated_names
                 lower_limits = self.robot.joints.lower_limits
                 upper_limits = self.robot.joints.upper_limits
+                average_limits = (lower_limits + upper_limits) / 2.0
+                # 创建关节信息列表，用于发送给 controls_widget
+                joint_info_list = []
+                for i, name in enumerate(joint_names):
+                    joint_info = {
+                        'name': name,
+                        'min': float(lower_limits[i]),
+                        'max': float(upper_limits[i]),
+                        'default': float(average_limits[i])
+                    }
+                    joint_info_list.append(joint_info)
 
                 for i, name in enumerate(joint_names):
-                    default_val = (float(lower_limits[i]) + float(upper_limits[i])) / 2.0
+                    default_val = float(average_limits[i])
                     self.current_joint_values[name] = default_val
                     self.target_joint_values[name] = default_val
                 
                 print(f"OptimizationThread: 已成功设置 pyroki.Robot 实例。 关节: {list(self.current_joint_values.keys())}")
+                
+                # 发射关节信息信号给 controls_widget
+                self.joint_info_signal.emit(joint_info_list)
+                
+                # 加载新模型后，总是触发一次手动更新以显示初始姿势
+                self._manual_update = True
+                self.wait_condition.wakeAll()
+                
             except Exception as e:
                 print(f"OptimizationThread: 解析 pyroki.Robot 时出错: {e}")
                 self.robot = None # 设置失败
@@ -343,8 +374,8 @@ class OptimizationThread(QThread):
             self.hand_keypoints = keypoints.copy()
             
             # 更新能量函数中的关键点
-            if hasattr(self.energy_function, 'energies'):
-                for energy in self.energy_function.energies:
+            if hasattr(self.energy_function, 'energy_functions'):
+                for energy in self.energy_function.energy_functions:
                     if isinstance(energy, PenetrationAvoidanceEnergy):
                         energy.set_key_points(self.hand_keypoints)
                         print(f"OptimizationThread: 已设置 {sum(len(points) for points in keypoints.values())} 个关键点到穿透避免能量函数")
@@ -386,7 +417,7 @@ class OptimizationThread(QThread):
                 self._manual_update = True # 标记为手动更新
                 self._needs_optimization = False # 手动操作会覆盖优化
                 self._is_paused = True # 手动调节时暂停优化
-                
+
                 self.wait_condition.wakeAll() # 唤醒 'run' 循环以应用FK
 
     @pyqtSlot(float, float, float)
@@ -611,6 +642,40 @@ class OptimizationThread(QThread):
             import traceback
             traceback.print_exc()
             return {}
+
+    def _check_and_perform_visualization(self):
+        """检查是否有待可视化的数据，如果有则执行可视化"""
+        if hasattr(self.energy_function, 'energy_functions'):
+            for energy in self.energy_function.energy_functions:
+                if isinstance(energy, PenetrationAvoidanceEnergy):
+                    viz_data = energy.get_pending_visualization_data()
+                    if viz_data is not None:
+                        # 在后台线程中可视化
+                        import threading
+                        def visualize_async():
+                            try:
+                                # 转换为numpy数组
+                                points_np = np.array(viz_data['points'])
+                                distances_np = np.array(viz_data['distances'])
+                                
+                                # 保存调试数据
+                                with open('/home/ubuntu/Documents/DexGraspMaker/debug_penetration.txt', 'w') as f:
+                                    f.write(f"关键点数量: {len(points_np)}\n")
+                                    f.write(f"穿透点数量: {np.sum(distances_np > 0)}\n")
+                                    f.write(f"最大穿透深度: {distances_np.max():.4f}m\n")
+                                    f.write(f"最小距离: {distances_np.min():.4f}m\n")
+                                    f.write("前10个关键点和距离:\n")
+                                    for i in range(min(10, len(points_np))):
+                                        f.write(".4f")
+                                
+                                # 执行可视化
+                                energy._visualize_keypoints_and_mesh(viz_data['object_mesh'], points_np, distances_np)
+                            except Exception as e:
+                                print(f"可视化失败: {e}")
+                        
+                        thread = threading.Thread(target=visualize_async, daemon=True)
+                        thread.start()
+                    break
 
 
 # --- 用于独立测试 ---
