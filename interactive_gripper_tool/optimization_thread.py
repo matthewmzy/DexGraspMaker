@@ -8,6 +8,8 @@ from PyQt6.QtCore import (
 import pyroki as pk
 import jaxlie
 from jax import numpy as jnp
+import os
+import yaml
 
 # 导入优化模块
 from optimization import (
@@ -20,6 +22,7 @@ from optimization import (
     CompositeEnergy,
     create_adam,
 )
+from optimization.optimizer_state import DEFAULT_SCALE_FACTORS as OS_DEFAULT_SCALE_FACTORS
 
 
 class OptimizationThread(QThread):
@@ -48,6 +51,9 @@ class OptimizationThread(QThread):
         self._needs_optimization = False # 优化循环的开关
         self._manual_update = False      # 手动关节更新的开关
         self._is_paused = False          # 优化暂停开关
+
+        # 当加载物体后需要在后台预计算SDF/距离场时使用
+        self._pending_precompute_mesh = None  # type: ignore[assignment]
 
         # --- 状态变量 (由 mutex 保护) ---
 
@@ -81,6 +87,10 @@ class OptimizationThread(QThread):
         self.energy_function = None
         self._setup_optimization()
 
+        # 参数缩放因子（用于平衡旋转/平移/关节的梯度量级）
+        # 默认采用 OptimizerState.DEFAULT_SCALE_FACTORS，可在运行时通过 set_scale_factors 调整
+        self.scale_factors = dict(OS_DEFAULT_SCALE_FACTORS)
+
     def stop(self) -> None:
         """
         请求线程停止。
@@ -103,6 +113,27 @@ class OptimizationThread(QThread):
         """
         with QMutexLocker(self.mutex):
             self._is_paused = False
+            self.wait_condition.wakeAll()
+
+    def set_scale_factors(self, rotation: float | None = None,
+                          translation: float | None = None,
+                          joints: float | None = None) -> None:
+        """在运行时调整参数缩放因子。传入的值会覆盖当前设置。"""
+        with QMutexLocker(self.mutex):
+            if rotation is not None:
+                self.scale_factors['rotation'] = float(rotation)
+            if translation is not None:
+                self.scale_factors['translation'] = float(translation)
+            if joints is not None:
+                self.scale_factors['joints'] = float(joints)
+            # 重置优化器以避免缩放变化导致的动量不一致
+            if self.optimizer is not None:
+                try:
+                    self.optimizer.reset()
+                except Exception:
+                    pass
+            # 触发一次手动更新以让可视化立即反映（不必等下一次优化步）
+            self._manual_update = True
             self.wait_condition.wakeAll()
     
     def _setup_optimization(self) -> None:
@@ -158,6 +189,94 @@ class OptimizationThread(QThread):
             
             print(f"OptimizationThread: 优化器已切换为 {optimizer_type}")
 
+    # 新增：应用 hand_config/<hand_name>.yaml 或 default.yaml 进行初始位姿与关节初始化
+    @pyqtSlot(str)
+    def apply_hand_config(self, hand_name: str) -> None:
+        """
+        根据 hand_config/<hand_name>.yaml 或 hand_config/default.yaml 初始化基座位姿与关节值。
+
+        YAML 格式：
+        base_pose:
+          translation_m: [x, y, z]
+          rpy_deg: [roll, pitch, yaw]
+        joints: "default" 或 {joint_name: value_in_radians}
+        """
+        # 计算 hand_config 目录
+        try:
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(current_dir)
+            config_dir = os.path.join(project_root, 'hand_config')
+            specific_cfg = os.path.join(config_dir, f"{hand_name}.yaml")
+            default_cfg = os.path.join(config_dir, 'default.yaml')
+
+            cfg_path = specific_cfg if os.path.exists(specific_cfg) else default_cfg
+            if not os.path.exists(cfg_path):
+                print(f"OptimizationThread: 未找到 hand 配置文件，跳过初始化: {cfg_path}")
+                return
+
+            with open(cfg_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+
+            base_pose_cfg = (cfg.get('base_pose') or {})
+            translation = base_pose_cfg.get('translation_m', [0.0, 0.0, 0.0])
+            rpy_deg = base_pose_cfg.get('rpy_deg', [0.0, 0.0, 0.0])
+
+            # 更新基座位姿
+            with QMutexLocker(self.mutex):
+                self.current_base_pose = np.eye(4)
+                self.current_base_pose[:3, 3] = np.array(translation, dtype=float)
+                roll, pitch, yaw = [np.deg2rad(v) for v in rpy_deg]
+                self.current_base_pose[:3, :3] = self._euler_to_matrix(roll, pitch, yaw)
+
+            # 关节初始化（需要 robot 已设置好以获取关节名与上下限）
+            with QMutexLocker(self.mutex):
+                if self.robot is None:
+                    print("OptimizationThread: 警告: Robot 尚未设置，无法应用 hand_config 关节初始化。")
+                    # 仍然触发一次 FK 以更新基座
+                    self._manual_update = True
+                    self.wait_condition.wakeAll()
+                    return
+
+                joint_names = list(self.robot.joints.actuated_names)
+                lower_limits = self.robot.joints.lower_limits
+                upper_limits = self.robot.joints.upper_limits
+                mid_limits = (lower_limits + upper_limits) / 2.0
+
+                joints_cfg = cfg.get('joints', 'default')
+                new_joint_values = {}
+                if isinstance(joints_cfg, str) and joints_cfg.lower() == 'default':
+                    for i, name in enumerate(joint_names):
+                        new_joint_values[name] = float(mid_limits[i])
+                elif isinstance(joints_cfg, dict):
+                    for i, name in enumerate(joint_names):
+                        if name in joints_cfg:
+                            try:
+                                new_joint_values[name] = float(joints_cfg[name])
+                            except Exception:
+                                new_joint_values[name] = float(mid_limits[i])
+                                print(f"OptimizationThread: joints[{name}] 解析失败，改用中值。")
+                        else:
+                            new_joint_values[name] = float(mid_limits[i])
+                            print(f"OptimizationThread: joints 未提供 {name}，改用中值。")
+                else:
+                    # 不识别的类型，退回默认
+                    for i, name in enumerate(joint_names):
+                        new_joint_values[name] = float(mid_limits[i])
+
+                # 应用到当前/目标
+                self.current_joint_values = new_joint_values.copy()
+                self.target_joint_values = new_joint_values.copy()
+
+                # 触发一次手动更新以广播到 UI（关节与基座）
+                self._manual_update = True
+                self._is_paused = True
+                self._needs_optimization = False
+                self.wait_condition.wakeAll()
+
+            print(f"OptimizationThread: 已应用 hand_config 初始化: {os.path.basename(cfg_path)}")
+        except Exception as e:
+            print(f"OptimizationThread: 应用 hand_config 失败: {e}")
+
 
     # --- 线程主循环 ---
 
@@ -174,6 +293,7 @@ class OptimizationThread(QThread):
                 # 如果没有工作 (优化=False, 手动=False) 并且在运行中，则等待
                 while (not self._needs_optimization 
                        and not self._manual_update 
+                       and self._pending_precompute_mesh is None
                        and self._is_running
                        and not self._is_paused):
                     
@@ -189,6 +309,9 @@ class OptimizationThread(QThread):
                 
                 is_optimizing = self._needs_optimization
                 is_manual_update = self._manual_update
+                local_precompute_mesh = self._pending_precompute_mesh
+                # 一次性取走待处理的预计算任务
+                self._pending_precompute_mesh = None
                 
                 if is_manual_update:
                     # 手动更新优先，并停止当前的优化
@@ -210,6 +333,17 @@ class OptimizationThread(QThread):
             # 这是此线程中耗时的部分
             
             try:
+                # A0. 首先处理可能存在的距离场预计算（在后台线程中执行，避免阻塞UI）
+                if local_precompute_mesh is not None:
+                    # 在能量函数中查找并预计算穿透避免的距离场
+                    if hasattr(self.energy_function, 'energy_functions'):
+                        for energy in self.energy_function.energy_functions:
+                            if isinstance(energy, PenetrationAvoidanceEnergy):
+                                print("OptimizationThread: 正在后台预计算物体距离场 (SDF)…")
+                                energy.precompute_distance_field(local_precompute_mesh)
+                                print("OptimizationThread: 物体距离场预计算完成。")
+                                break
+                
                 if is_optimizing:
                     # A. 运行一步梯度下降（真实优化）
                     new_pose, new_joints = self._optimization_step(
@@ -257,9 +391,6 @@ class OptimizationThread(QThread):
             self.base_pose_updated_signal.emit(base_translation, base_rotation)
             self.joint_values_updated_signal.emit(joint_snapshot)
             
-            # 检查是否有待可视化的数据
-            self._check_and_perform_visualization()
-            
             # 休息 16ms (~60 FPS) 以产生平滑的动画效果
             # 并防止 CPU 100% 占用
             self.msleep(16)
@@ -278,6 +409,12 @@ class OptimizationThread(QThread):
             self.anchor_pairs = anchor_pairs
             if self.anchor_pairs:
                 self._needs_optimization = True
+                # 每次开始新的优化时重置内部优化器状态，防止沿用旧的动量/状态
+                try:
+                    if self.optimizer is not None:
+                        self.optimizer.reset()
+                except Exception:
+                    pass
                 print(f"OptimizationThread: 已收到 {len(anchor_pairs)} 个锚点，开始优化。")
             else:
                 self._needs_optimization = False # 没有锚点，停止优化
@@ -295,15 +432,11 @@ class OptimizationThread(QThread):
         """
         with QMutexLocker(self.mutex):
             self.object_mesh = mesh
-            
-            # 预计算距离场用于精确的穿透检测
-            if hasattr(self.energy_function, 'energy_functions'):
-                for energy in self.energy_function.energy_functions:
-                    if isinstance(energy, PenetrationAvoidanceEnergy):
-                        energy.precompute_distance_field(mesh)
-                        break
-            
-            print(f"OptimizationThread: 设置了物体网格，顶点数: {len(mesh.points) if hasattr(mesh, 'points') else '未知'}")
+            # 将距离场预计算任务委派给本线程的后台处理，避免阻塞UI线程
+            self._pending_precompute_mesh = mesh
+            self.wait_condition.wakeAll()
+
+            print(f"OptimizationThread: 已设置物体网格（预计算任务已入队）。顶点数: {len(mesh.points) if hasattr(mesh, 'points') else '未知'}")
     
     def set_pyroki_robot(self, robot: pk.Robot) -> None:
         """
@@ -535,10 +668,12 @@ class OptimizationThread(QThread):
         
         # 2. 创建优化状态
         joint_names = self.robot.joints.actuated_names
+        
         state = OptimizerState.from_numpy(
             current_pose,
             current_joints,
-            joint_names
+            joint_names,
+            self.scale_factors
         )
         
         # 3. 定义损失函数
@@ -571,6 +706,21 @@ class OptimizationThread(QThread):
             # 5. 转换回 NumPy 格式
             new_pose = np.array(new_state.to_base_pose_matrix())
             new_joints = new_state.to_joint_dict()
+
+            # 调试（每30步）：打印参数步长，便于观察缩放因子效果
+            if self._step_counter % 30 == 0:
+                try:
+                    old_pose = np.array(state.to_base_pose_matrix())
+                    dt = np.linalg.norm(new_pose[:3, 3] - old_pose[:3, 3])
+                    # 粗略角度差估计：通过旋转矩阵迹
+                    R_old = old_pose[:3, :3]
+                    R_new = new_pose[:3, :3]
+                    cos_theta = (np.trace(R_old.T @ R_new) - 1.0) / 2.0
+                    cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                    dtheta = float(np.arccos(cos_theta))
+                    print(f"OptimizationThread: Δtrans={dt:.6f} m, Δrot={np.degrees(dtheta):.3f} deg (scaled via {self.scale_factors})")
+                except Exception:
+                    pass
             
             return new_pose, new_joints
             
@@ -642,40 +792,6 @@ class OptimizationThread(QThread):
             import traceback
             traceback.print_exc()
             return {}
-
-    def _check_and_perform_visualization(self):
-        """检查是否有待可视化的数据，如果有则执行可视化"""
-        if hasattr(self.energy_function, 'energy_functions'):
-            for energy in self.energy_function.energy_functions:
-                if isinstance(energy, PenetrationAvoidanceEnergy):
-                    viz_data = energy.get_pending_visualization_data()
-                    if viz_data is not None:
-                        # 在后台线程中可视化
-                        import threading
-                        def visualize_async():
-                            try:
-                                # 转换为numpy数组
-                                points_np = np.array(viz_data['points'])
-                                distances_np = np.array(viz_data['distances'])
-                                
-                                # 保存调试数据
-                                with open('/home/ubuntu/Documents/DexGraspMaker/debug_penetration.txt', 'w') as f:
-                                    f.write(f"关键点数量: {len(points_np)}\n")
-                                    f.write(f"穿透点数量: {np.sum(distances_np > 0)}\n")
-                                    f.write(f"最大穿透深度: {distances_np.max():.4f}m\n")
-                                    f.write(f"最小距离: {distances_np.min():.4f}m\n")
-                                    f.write("前10个关键点和距离:\n")
-                                    for i in range(min(10, len(points_np))):
-                                        f.write(".4f")
-                                
-                                # 执行可视化
-                                energy._visualize_keypoints_and_mesh(viz_data['object_mesh'], points_np, distances_np)
-                            except Exception as e:
-                                print(f"可视化失败: {e}")
-                        
-                        thread = threading.Thread(target=visualize_async, daemon=True)
-                        thread.start()
-                    break
 
 
 # --- 用于独立测试 ---

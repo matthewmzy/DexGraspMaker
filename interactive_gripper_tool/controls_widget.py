@@ -275,7 +275,7 @@ class ControlsWidget(QWidget):
         hand_group = QGroupBox("中间视图: 机械手 (动态)")
         hand_layout = QGridLayout(hand_group)
         self.hand_opacity_slider = create_opacity_slider()
-        self.hand_opacity_slider.setValue(70)
+        self.hand_opacity_slider.setValue(100)
         hand_layout.addWidget(QLabel("透明度:"), 0, 0)
         hand_layout.addWidget(self.hand_opacity_slider, 0, 1)
         
@@ -344,10 +344,10 @@ class ControlsWidget(QWidget):
         # 优化控制组
         opt_group = QGroupBox("优化控制")
         opt_layout = QVBoxLayout(opt_group)
-
         self.optimization_toggle_button = QPushButton("▶️ 开始优化")
         self.optimization_toggle_button.setCheckable(True)
-        self.optimization_toggle_button.setChecked(True)
+        # 默认不启用优化
+        self.optimization_toggle_button.setChecked(False)
         self.optimization_toggle_button.clicked.connect(self._on_optimization_toggle)
         opt_layout.addWidget(self.optimization_toggle_button)
 

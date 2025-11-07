@@ -1,0 +1,13 @@
+# Initial configuration for hand pose and joints
+# Units:
+# - translation_m: meters [x, y, z]
+# - rpy_deg: degrees [roll, pitch, yaw] in ZYX application order for display; code uses intrinsic XYZ when calling helper
+# - joints: either the string "default" or a mapping of joint_name: float (radians)
+
+base_pose:
+  translation_m: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
+
+# If set to "default", joint initial values are the midpoint of each joint's limits.
+# Otherwise, provide a mapping of joint names to radians.
+joints: default

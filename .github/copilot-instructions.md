@@ -1,193 +1,49 @@
-# DexGraspMaker AI Coding Instructions
+## DexGraspMaker — AI coding instructions (concise)
 
-## Architecture Overview
+Interactive PyQt6 app for robotic grasp pose optimization. Three PyVista views (left/object, center/live hand, right/static hand). Data flows via Qt signals; optimization runs in a background thread with JAX/pyroki.
 
-DexGraspMaker is a PyQt6-based interactive tool for robotic grasping pose optimization. The app features three synchronized 3D views (left/center/right) using PyVista, with a DataManager coordinating state between UI components and a separate OptimizationThread running JAX-based differentiable optimization.
+Architecture (key files)
+- `interactive_gripper_tool/main.py`: entrypoint; parses `--load-default` and creates `MainWindow`.
+- `interactive_gripper_tool/main_window.py`: wires three `VistaWidget`s, `ControlsWidget`, `DataManager`, `OptimizationThread` via signals/slots.
+- `interactive_gripper_tool/vista_widget.py`: 3D view. Stores actors in a dict; update via `actor.user_matrix`. Emits `point_picked_signal({'actor_name', 'world_coord', 'relative_coord'})`.
+- `interactive_gripper_tool/data_manager.py`: state hub. Loads meshes/URDF, manages two-stage anchor picking, emits robot/link meshes/joint info/anchors.
+- `interactive_gripper_tool/optimization_thread.py`: QThread doing optimization + FK; emits link poses and updated base/joints at ~60 FPS.
+- `interactive_gripper_tool/optimization/*`: optimization primitives; see `optimization/README.md` for energy/optimizer APIs.
 
-**Core Components:**
-- `DataManager`: Central state hub using Qt signals/slots for inter-component communication
-- `OptimizationThread`: Runs JAX optimization in background thread to avoid UI blocking
-- `VistaWidget`: PyVista-based 3D rendering widgets with actor-based scene management
-- `ControlsWidget`: Qt controls organized in tabs (files/controls, anchors, visualization, joint debugging)
+Communication & naming contracts
+- Only use signals/slots across components (no direct method calls).
+- Actor names are stable keys in `VistaWidget.actors`.
+  - Dynamic hand pose updates use prefix `dyn_hand_` (see `OptimizationThread.actor_name_prefix`).
+  - Static right-hand picking uses prefix `static_hand_` (parsed in `DataManager.on_hand_point_picked`). Keep these prefixes consistent across views.
+- Picking signal payload example: `{'actor_name': 'static_hand_<link>', 'world_coord': [x,y,z], 'relative_coord': [x,y,z]}`.
 
-## Key Patterns & Conventions
+Loading pipelines (project-specific behavior)
+- Object mesh: `DataManager.load_object*()` reads with PyVista and auto scales to meters if `max(bounds_size) > 10` (assumes mm→m).
+- URDF hand: `yourdfpy.URDF.load(...)` → build `pk.Robot` (JAX-native) → extract per-link meshes from trimesh scene → emit:
+  - `hand_loaded_signal({link_name: pyvista.PolyData})`
+  - `hand_joint_info_signal([{'name','min','max','default'}])`
+  - `pyroki_robot_loaded_signal(pk.Robot)` and initial link poses via `hand_initial_pose_signal`.
+- Keypoints/spheres: generated or loaded per link (`hand_keypoints_loaded_signal`, `hand_link_spheres_loaded_signal`) for penetration/self-collision energies.
 
-### Signal-Slot Communication
-Use Qt signals/slots for all inter-component communication. Never have components directly call methods on each other.
+Optimization loop (defaults and where to change)
+- Energies combined via `CompositeEnergy`: `AnchorPointEnergy(1.0) + JointLimitEnergy(0.5, margin=0.1) + PenetrationAvoidanceEnergy(2.0) + SelfCollisionAvoidanceEnergy(0.3, margin=0.005)` (set in `_setup_optimization`).
+- Optimizer: Optax-based Adam via `create_adam(learning_rate=0.01, clip_grad=1.0)`. Switch via `OptimizationThread.set_optimizer('adam'|'adamw'|'lion'|'sgd', **kwargs)`.
+- Variables managed with `OptimizerState` (SE(3) + joints). Scale factors used to balance gradients: translation scaled by 0.1.
+- FK via `pyroki.Robot.forward_kinematics`; poses emitted as `{ 'dyn_hand_<link>': 4x4 }`. Rate throttled with `msleep(16)`.
 
-```python
-# DataManager emits signals, UI components connect slots
-self.object_loaded_signal = pyqtSignal(pyvista.PolyData)
-data_manager.object_loaded_signal.connect(left_view.load_mesh)
-```
+3D rendering patterns
+- Use `VistaWidget.load_hand(links_dict, name_prefix='dyn_hand_')` for dynamic view and `name_prefix='static_hand_'` for static/picking view.
+- Update all link poses in bulk with `VistaWidget.update_hand_pose(link_poses_dict)`; individual with `update_actor_pose(name, pose)`.
+- Picking is enabled per view; ensure `_picking_enabled` is true before expecting `point_picked_signal`.
 
-### Actor-Based 3D Scene Management
-3D scenes use named actors stored in dictionaries. Always use consistent naming prefixes:
+Developer workflows
+- Launch (recommended): `./run.sh` (sets OpenGL env, activates conda `dgm`, forwards args). Alt: `conda activate dgm && python interactive_gripper_tool/main.py`.
+- Quick validation: run with `--load-default` to auto-load test assets from `test_assets/`.
+- Tuning: edit energies/weights in `OptimizationThread._setup_optimization()`; switch optimizer via `set_optimizer(...)`.
+- Debugging: watch console prints and `status_message_signal` updates; detailed energies print every 30 steps.
 
-```python
-# In VistaWidget
-self.actors = {}  # dict[str, pyvista.Actor]
-self.actors[f"{self.actor_name_prefix}link_{i}"] = actor
-
-# In OptimizationThread
-self.actor_name_prefix = "dyn_hand_"  # Must match VistaWidget
-```
-
-### Two-Stage Anchor Point Picking
-Anchor points are created in two stages: pick hand point first, then corresponding object point.
-
-```python
-# DataManager manages picking state
-self._current_pick_stage = 'hand'  # or 'object'
-self._temp_hand_anchor = None
-```
-
-### Composite Energy Functions
-Optimization uses weighted combinations of energy functions. Always use `CompositeEnergy` for multiple objectives:
-
-```python
-from optimization import CompositeEnergy, AnchorPointEnergy, JointLimitEnergy
-
-energy_fn = CompositeEnergy([
-    AnchorPointEnergy(weight=1.0),      # Primary: anchor matching
-    JointLimitEnergy(weight=0.5),       # Secondary: joint limits
-    CollisionAvoidanceEnergy(weight=0.1) # Tertiary: collision avoidance
-])
-```
-
-### SE(3) Pose Optimization
-Use `OptimizerState` for managing optimization variables with proper SE(3) representations:
-
-```python
-from optimization import OptimizerState
-
-# Create state from 4x4 matrix and joint values
-state = OptimizerState.from_numpy(
-    base_pose_4x4=np.eye(4),
-    joint_dict={'joint1': 0.0, 'joint2': 0.5},
-    joint_names=['joint1', 'joint2']
-)
-
-# Get optimization vector [wxyz(4), xyz(3), joints(N)]
-x = state.get_optimization_vector()
-```
-
-## Critical Developer Workflows
-
-### Launching the Application
-Always use `./run.sh` which sets required OpenGL environment variables:
-
-```bash
-# Standard launch
-./run.sh
-
-# Load default test assets automatically
-./run.sh --load-default
-```
-
-The script activates conda environment `dgm` and handles OpenGL driver paths.
-
-### Testing Changes
-Run with `--load-default` flag to automatically load test hand/object models for validation:
-
-```bash
-./run.sh --load-default
-```
-
-### Optimization Debugging
-Monitor optimization progress through status bar messages and pose update signals. The optimization thread runs at ~60 FPS with `msleep(16)`.
-
-## Dependencies & Integration Points
-
-### Robotics Stack
-- **pyroki**: Custom differentiable kinematics library (forward kinematics, collision detection)
-- **JAX**: Automatic differentiation for optimization
-- **jaxlie**: Lie group operations for SE(3) poses
-
-### 3D Rendering & Meshes
-- **PyVista**: 3D rendering in Qt widgets
-- **trimesh**: Mesh loading and processing
-- **yourdfpy**: URDF parsing for robot models
-
-### UI Framework
-- **PyQt6**: Qt6 Python bindings for desktop UI
-- **pyvistaqt**: PyVista-Qt integration
-
-## Common Implementation Patterns
-
-### Thread-Safe State Updates
-Use `QMutexLocker` for thread-safe access to shared state:
-
-```python
-def update_anchor_pairs(self, anchors: list):
-    with QMutexLocker(self.mutex):
-        self.anchor_pairs = anchors.copy()
-        self._needs_optimization = True
-        self.wait_condition.wakeAll()
-```
-
-### Error Handling
-Use try/catch in main components with status bar feedback:
-
-```python
-try:
-    # risky operation
-    self.status_message_signal.emit("Operation completed")
-except Exception as e:
-    self.status_message_signal.emit(f"Error: {str(e)}")
-```
-
-### File Loading with Unit Scaling
-Always use `QFileDialog` for user file selection, emit signals on success, and handle unit scaling:
-
-```python
-def load_object(self):
-    file_path, _ = QFileDialog.getOpenFileName(
-        self.parent(), "Select Object Mesh",
-        "", "Mesh files (*.stl *.ply *.obj)"
-    )
-    if file_path:
-        mesh = pyvista.read(file_path)
-        # Auto-scale large meshes (assuming mm to m conversion)
-        if max(mesh.bounds_size) > 10:
-            mesh.scale(0.001, inplace=True)
-        self.object_loaded_signal.emit(mesh)
-```
-
-### URDF Loading Pipeline
-Follow the complete URDF loading sequence:
-
-```python
-def load_hand_from_file(self, file_path: str):
-    # 1. Parse URDF with yourdfpy (handles package:// paths)
-    urdf = yourdfpy.URDF.load(file_path)
-    
-    # 2. Create pyroki Robot for optimization
-    robot = pk.Robot.from_urdf(file_path)
-    
-    # 3. Extract meshes for visualization
-    link_meshes = {}
-    for link in urdf.links:
-        if link.visuals:
-            link_meshes[link.name] = link.visuals[0].geometry.mesh
-    
-    # 4. Extract joint info for UI controls
-    joint_info = [{'name': j.name, 'min': j.limit.lower, 'max': j.limit.upper} 
-                  for j in urdf.joints if j.limit]
-    
-    # Emit all signals
-    self.hand_loaded_signal.emit(link_meshes)
-    self.hand_joint_info_signal.emit(joint_info)
-    self.pyroki_robot_loaded_signal.emit(robot)
-```
-
-## Testing & Validation
-
-Focus validation on:
-1. Signal connections between components
-2. Actor naming consistency across views (critical for pose updates)
-3. Thread synchronization in optimization updates
-4. Energy function weight tuning for convergence
-5. Unit scaling in mesh loading (mm vs meters)
-
-Use `--load-default` flag for quick iteration testing with known-good assets from `test_assets/`.
+Gotchas
+- Keep actor prefixes consistent across producer/consumer; mismatches break pose updates and picking mapping.
+- Always communicate via signals to avoid cross-thread/UI blocking.
+- Respect mesh units (mm vs m) and avoid re-scaling already scaled data.
+- Ensure joint dicts include all `robot.joints.actuated_names` before FK; otherwise FK returns empty.

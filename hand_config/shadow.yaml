@@ -1,0 +1,11 @@
+# Shadow hand configuration
+
+# Relative path from project root to the URDF file
+urdf_path: test_assets/shadow/shadow_hand_right.urdf
+
+base_pose:
+  translation_m: [0.0, 0.0, 0.0]
+  rpy_deg: [0.0, 0.0, 0.0]
+
+# Initialize joints: use "default" midpoint policy or specify per-joint radians
+joints: default

@@ -8,15 +8,7 @@ import jax
 import jax.numpy as jnp
 from typing import Callable, Tuple, Optional
 from .optimizer_state import OptimizerState
-
-try:
-    import optax
-except ImportError:
-    raise ImportError(
-        "Optax 是必需的依赖。请安装: pip install optax\n"
-        "Optax 提供高性能优化器，性能优于 PyTorch Adam"
-    )
-
+import optax
 
 class Optimizer:
     """
@@ -53,14 +45,17 @@ class Optimizer:
         
         # 计算损失和梯度
         loss_value, grad = jax.value_and_grad(
-            lambda vec: loss_fn(OptimizerState.from_optimization_vector(vec, state.joint_names))
+            lambda vec: loss_fn(OptimizerState.from_optimization_vector(vec, state.joint_names, state.scale_factors))
         )(x)
         
         # Optax 更新
         updates, self.opt_state = self.optax_optimizer.update(grad, self.opt_state, x)
         x_new = optax.apply_updates(x, updates)
         
-        new_state = OptimizerState.from_optimization_vector(x_new, state.joint_names)
+        # 保持与输入 state 相同的 scale_factors，避免反缩放不一致导致位姿被意外缩放/重置
+        new_state = OptimizerState.from_optimization_vector(
+            x_new, state.joint_names, state.scale_factors
+        )
         
         return new_state, float(loss_value)
     

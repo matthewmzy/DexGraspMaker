@@ -123,10 +123,6 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
         self.distance_field = None
         self.field_bounds = None
         self.field_shape = None
-        
-        # 可视化标志
-        self._visualized = False
-        self._pending_visualization_data = None
     
     def set_key_points(self, key_points: Dict[str, np.ndarray]):
         """
@@ -305,106 +301,6 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
         # 使用高级索引获取值
         return field[x, y, z]
     
-    def _visualize_keypoints_and_mesh(self, mesh, key_points_world: jnp.ndarray, distances: jnp.ndarray):
-        """
-        可视化物体mesh和关键点位置
-        
-        Args:
-            mesh: trimesh.Trimesh对象
-            key_points_world: (N, 3) 世界坐标系中的关键点
-            distances: (N,) 对应的距离值
-        """
-        if self._visualized:
-            return
-        
-        self._visualized = True
-        
-        print("PenetrationAvoidanceEnergy: 显示关键点和物体可视化...")
-        
-        fig = plt.figure(figsize=(12, 8))
-        ax = fig.add_subplot(111, projection='3d')
-        
-        # 显示物体mesh
-        if mesh is not None:
-            try:
-                # 使用trimesh的plot功能，但这里我们用简单的散点图近似
-                # 为了简单，我们只显示边界框
-                raw_bounds = mesh.bounds
-                print(f"raw_bounds: {raw_bounds}, type: {type(raw_bounds)}")
-                bounds = np.array(mesh.bounds)
-                print(f"bounds after np.array: {bounds}, shape: {bounds.shape}, ndim: {bounds.ndim}")
-                
-                # 确保bounds是正确的形状
-                if bounds.ndim == 1 and len(bounds) == 6:
-                    # BoundsTuple顺序: x_min, x_max, y_min, y_max, z_min, z_max
-                    x_min, x_max, y_min, y_max, z_min, z_max = bounds
-                    bounds = np.array([
-                        [x_min, y_min, z_min],
-                        [x_max, y_max, z_max]
-                    ])
-                    print(f"bounds after correct reshape: {bounds}, shape: {bounds.shape}")
-                
-                ax.set_xlim(bounds[0, 0], bounds[1, 0])
-                ax.set_ylim(bounds[0, 1], bounds[1, 1])
-                ax.set_zlim(bounds[0, 2], bounds[1, 2])
-                
-                # 添加边界框线条
-                from mpl_toolkits.mplot3d.art3d import Line3DCollection
-                edges = [
-                    [(bounds[0, 0], bounds[0, 1], bounds[0, 2]), (bounds[1, 0], bounds[0, 1], bounds[0, 2])],
-                    [(bounds[0, 0], bounds[0, 1], bounds[0, 2]), (bounds[0, 0], bounds[1, 1], bounds[0, 2])],
-                    [(bounds[0, 0], bounds[0, 1], bounds[0, 2]), (bounds[0, 0], bounds[0, 1], bounds[1, 2])],
-                    [(bounds[1, 0], bounds[1, 1], bounds[1, 2]), (bounds[0, 0], bounds[1, 1], bounds[1, 2])],
-                    [(bounds[1, 0], bounds[1, 1], bounds[1, 2]), (bounds[1, 0], bounds[0, 1], bounds[1, 2])],
-                    [(bounds[1, 0], bounds[1, 1], bounds[1, 2]), (bounds[1, 0], bounds[1, 1], bounds[0, 2])],
-                    [(bounds[1, 0], bounds[0, 1], bounds[0, 2]), (bounds[1, 0], bounds[1, 1], bounds[0, 2])],
-                    [(bounds[1, 0], bounds[0, 1], bounds[0, 2]), (bounds[1, 0], bounds[0, 1], bounds[1, 2])],
-                    [(bounds[0, 0], bounds[1, 1], bounds[0, 2]), (bounds[1, 0], bounds[1, 1], bounds[0, 2])],
-                    [(bounds[0, 0], bounds[1, 1], bounds[0, 2]), (bounds[0, 0], bounds[1, 1], bounds[1, 2])],
-                    [(bounds[0, 0], bounds[0, 1], bounds[1, 2]), (bounds[1, 0], bounds[0, 1], bounds[1, 2])],
-                    [(bounds[0, 0], bounds[0, 1], bounds[1, 2]), (bounds[0, 0], bounds[1, 1], bounds[1, 2])],
-                ]
-                ax.add_collection3d(Line3DCollection(edges, colors='black', alpha=0.3))
-            except Exception as e:
-                print(f"可视化边界框失败: {e}")
-                # 设置默认范围
-                ax.set_xlim(-0.1, 0.1)
-                ax.set_ylim(-0.1, 0.1)
-                ax.set_zlim(-0.1, 0.1)
-        
-        # 显示关键点
-        points_np = np.array(key_points_world)
-        distances_np = np.array(distances)
-        
-        # 根据距离着色：红色=穿透(距离>0), 蓝色=外部(距离<=0)
-        colors = np.where(distances_np > 0, 'red', 'blue')
-        
-        scatter = ax.scatter(points_np[:, 0], points_np[:, 1], points_np[:, 2], 
-                           c=colors, s=50, alpha=0.8)
-        
-        # 添加图例
-        ax.scatter([], [], c='red', label='Inside (Penetrating)', s=50)
-        ax.scatter([], [], c='blue', label='Outside', s=50)
-        ax.legend()
-        
-        ax.set_xlabel('X (m)')
-        ax.set_ylabel('Y (m)')
-        ax.set_zlabel('Z (m)')
-        ax.set_title(f'Hand Keypoints vs Object Mesh\n{len(points_np)} keypoints, {np.sum(distances_np > 0)} penetrating')
-        
-        # 打印统计信息
-        print(f"关键点统计:")
-        print(f"  总数: {len(points_np)}")
-        print(f"  穿透点: {np.sum(distances_np > 0)}")
-        print(f"  外部点: {np.sum(distances_np <= 0)}")
-        if np.any(distances_np > 0):
-            print(f"  最大穿透深度: {distances_np.max():.4f}m")
-        
-        plt.tight_layout()
-        plt.savefig('/home/ubuntu/Documents/DexGraspMaker/keypoints_visualization.png', dpi=150, bbox_inches='tight')
-        print("可视化已保存到: keypoints_visualization.png")
-        plt.show()
-    
     def compute(self, state, robot, object_mesh=None, **kwargs) -> jnp.ndarray:
         """
         计算穿透避免能量
@@ -469,24 +365,7 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
         # 直接使用穿透距离的总和作为能量（不使用二次惩罚）
         total_energy = jnp.sum(penetration_depths)
         
-        # 如果还没有可视化，设置待可视化数据
-        if not self._visualized and len(all_points_world) > 0:
-            self._pending_visualization_data = {
-                'points': points_array,
-                'distances': distances,
-                'object_mesh': object_mesh
-            }
-        
         return total_energy * self.weight
-    
-    def get_pending_visualization_data(self):
-        """获取待可视化的数据，如果有的话"""
-        if self._pending_visualization_data is not None:
-            data = self._pending_visualization_data
-            self._pending_visualization_data = None
-            self._visualized = True
-            return data
-        return None
     
     def get_weight(self) -> float:
         return self.weight

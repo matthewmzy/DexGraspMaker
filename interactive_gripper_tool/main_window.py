@@ -3,7 +3,7 @@ import numpy as np
 import sys
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QSplitter, QLabel, QFrame, QApplication
+    QSplitter, QLabel, QFrame, QApplication, QFileDialog, QMessageBox
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QObject, QThread
 
@@ -20,8 +20,9 @@ class MainWindow(QMainWindow):
     负责初始化所有UI组件和核心逻辑模块，并设置窗口布局。 
     """
     
-    def __init__(self, parent: QWidget | None = None, load_default: bool = False) -> None:
+    def __init__(self, parent: QWidget | None = None, load_default: bool = False, selected_hand: str = "shadow") -> None:
         super().__init__(parent)
+        self.selected_hand = selected_hand
         
         # 1. 初始化核心逻辑组件 (非UI)
         self.init_core_components() 
@@ -52,6 +53,9 @@ class MainWindow(QMainWindow):
         self.data_manager = DataManager(self)
         self.optimization_thread = OptimizationThread(self)
         self.keyboard_controller = KeyboardController(self)
+        # 将选择的手配置名通知 DataManager（用于 hand_config 名称）
+        if hasattr(self, 'selected_hand') and self.selected_hand:
+            self.data_manager.set_selected_hand_name(self.selected_hand)
 
     def init_ui(self) -> None:
         """
@@ -121,9 +125,10 @@ class MainWindow(QMainWindow):
         self.data_manager.object_loaded_signal.connect(
             lambda mesh_data: self.view_left.load_mesh(mesh_data, name="object")
         )
+        # 初始改为完全不透明，保持与可视化面板默认滑块(100%)一致，再由用户调节
         self.data_manager.object_loaded_signal.connect(
-            lambda mesh_data: self.view_center.load_mesh(mesh_data, name="object", opacity=0.5) 
-        )   # 中间视图的物体是半透明的
+            lambda mesh_data: self.view_center.load_mesh(mesh_data, name="object", opacity=1.0) 
+        )
 
         # --- 2.b 发送mesh到优化线程 ---
         self.data_manager.object_loaded_signal.connect(self.optimization_thread.set_object_mesh)
@@ -133,9 +138,10 @@ class MainWindow(QMainWindow):
         self.data_manager.hand_loaded_signal.connect(
             lambda links_dict: self.view_right.load_hand(links_dict, name_prefix="static_hand_")
         )
+        # 同理手的初始透明度设为1.0，与滑块保持一致
         self.data_manager.hand_loaded_signal.connect(
-            lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_", opacity=0.5)
-        )  # 中间视图的手是半透明的
+            lambda links_dict: self.view_center.load_hand(links_dict, name_prefix="dyn_hand_", opacity=1.0)
+        )
 
         # --- 3.b 接收初始姿态及实时关节信息 ---
         self.data_manager.hand_initial_pose_signal.connect(self.on_hand_initial_pose_received)
@@ -143,6 +149,8 @@ class MainWindow(QMainWindow):
 
         # --- 3.c 将 JAX Robot 模型发送到后端优化线程 ---
         self.data_manager.pyroki_robot_loaded_signal.connect(self.optimization_thread.set_pyroki_robot)
+        # 新增：手身份信号接入主窗口以确保配置存在后再应用
+        self.data_manager.hand_identity_loaded_signal.connect(self.on_hand_identity_loaded)
         self.data_manager.hand_keypoints_loaded_signal.connect(self.optimization_thread.set_hand_keypoints)
         self.data_manager.hand_link_spheres_loaded_signal.connect(self.optimization_thread.set_link_spheres)
 
@@ -213,6 +221,8 @@ class MainWindow(QMainWindow):
         # --- 5. 触发优化 ---
         # 数据管理器 (凑成一对) -> 优化线程 (开始计算)
         self.data_manager.new_anchor_pair_signal.connect(self.optimization_thread.trigger_optimization)
+        # 新增：当确认添加锚点对后，自动开始优化并同步按钮状态
+        self.data_manager.new_anchor_pair_signal.connect(self.on_new_anchor_pair_auto_start)
 
         # --- 6. 实时更新 ---
         # 优化线程 (计算出新位姿) -> 主窗口 (更新渲染和锚点)
@@ -233,6 +243,10 @@ class MainWindow(QMainWindow):
         self.controls_widget.manual_joint_changed_signal.connect(self.optimization_thread.set_manual_joint)
         self.controls_widget.base_translation_changed_signal.connect(self.optimization_thread.set_base_translation)
         self.controls_widget.base_rotation_changed_signal.connect(self.optimization_thread.set_base_rotation)
+        # 新增：一旦发生手动调整，立刻将优化按钮置为“暂停”以反映真实状态
+        self.controls_widget.manual_joint_changed_signal.connect(lambda *_: self.controls_widget.set_optimization_state(False))
+        self.controls_widget.base_translation_changed_signal.connect(lambda *_: self.controls_widget.set_optimization_state(False))
+        self.controls_widget.base_rotation_changed_signal.connect(lambda *_: self.controls_widget.set_optimization_state(False))
         
         # --- 9. 状态同步，从优化线程 ---
         self.optimization_thread.base_pose_updated_signal.connect(self.on_base_pose_updated)
@@ -325,6 +339,18 @@ class MainWindow(QMainWindow):
             )
         
         # 可以在此处扩展颜色等其他设置...
+
+    def on_new_anchor_pair_auto_start(self, anchor_pairs: list) -> None:
+        """
+        当确认添加锚点对后，自动开始优化并同步按钮状态。
+        """
+        if not anchor_pairs:
+            return
+        # 同步UI：切换到“运行中”
+        self.controls_widget.set_optimization_state(True)
+        # 恢复线程并触发优化（使用当前锚点）
+        self.optimization_thread.resume()
+        self.optimization_thread.trigger_optimization(anchor_pairs)
 
     def on_hand_initial_pose_received(self, poses_dict: dict[str, np.ndarray]) -> None:
         """
@@ -545,7 +571,7 @@ class MainWindow(QMainWindow):
         """
         自动加载默认测试资源
         """
-        import os
+        import os, yaml
         from PyQt6.QtCore import QTimer
         
         # 获取项目根目录（main_window.py 的上级目录）
@@ -553,7 +579,39 @@ class MainWindow(QMainWindow):
         project_root = os.path.dirname(current_dir)
         
         object_path = os.path.join(project_root, "test_assets", "objects", "Mug.obj")
-        hand_path = os.path.join(project_root, "test_assets", "shadow", "shadow_hand_right.urdf")
+        # 从 hand_config/<selected_hand>.yaml 读取 URDF 路径（如不存在则回退到 shadow）
+        cfg_dir = os.path.join(project_root, 'hand_config')
+        selected = getattr(self, 'selected_hand', 'shadow') or 'shadow'
+        # 若不存在则提示创建并返回最终路径（或None）
+        cfg_path = self._ensure_hand_config(selected, cfg_dir, project_root)
+        if not cfg_path:
+            # 尝试 default.yaml
+            cfg_path = os.path.join(cfg_dir, 'default.yaml')
+            if not os.path.exists(cfg_path):
+                print(f"警告: 未找到手配置，且 default.yaml 不存在，将使用内置的影子手路径。")
+                cfg = {}
+            else:
+                try:
+                    with open(cfg_path, 'r') as f:
+                        cfg = yaml.safe_load(f) or {}
+                except Exception as e:
+                    print(f"加载 hand 配置失败: {e}")
+                    cfg = {}
+        else:
+            try:
+                with open(cfg_path, 'r') as f:
+                    cfg = yaml.safe_load(f) or {}
+            except Exception as e:
+                print(f"加载 hand 配置失败: {e}")
+                cfg = {}
+        try:
+            with open(cfg_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"加载 hand 配置失败: {e}")
+            cfg = {}
+        urdf_rel = cfg.get('urdf_path') or os.path.join('test_assets', 'shadow', 'shadow_hand_right.urdf')
+        hand_path = urdf_rel if os.path.isabs(urdf_rel) else os.path.join(project_root, urdf_rel)
         
         print(f"自动加载默认资源...")
         print(f"  物体: {object_path}")
@@ -570,13 +628,79 @@ class MainWindow(QMainWindow):
             
             if os.path.exists(hand_path):
                 self.data_manager.load_hand_from_file(hand_path)
-                self.statusBar().showMessage(f"✓ 已自动加载手部: shadow_hand_right.urdf")
+                self.statusBar().showMessage(f"✓ 已自动加载手部: {os.path.basename(hand_path)}")
             else:
                 print(f"警告: 未找到手部文件: {hand_path}")
                 self.statusBar().showMessage(f"✗ 未找到手部文件: {hand_path}")
         
         # 延迟500ms后加载，确保窗口已显示
         QTimer.singleShot(500, delayed_load)
+
+    def _ensure_hand_config(self, hand_name: str, cfg_dir: str, project_root: str) -> str | None:
+        """确保 hand_config/<hand_name>.yaml 存在；如果不存在则询问是否创建并选择URDF路径创建。
+
+        返回配置文件的绝对路径；若用户取消则返回 None。
+        """
+        import os, yaml
+        os.makedirs(cfg_dir, exist_ok=True)
+        cfg_path = os.path.join(cfg_dir, f"{hand_name}.yaml")
+        if os.path.exists(cfg_path):
+            return cfg_path
+
+        # 询问是否创建
+        reply = QMessageBox.question(
+            self,
+            "创建手配置",
+            f"未找到手配置文件: {cfg_path}\n是否现在创建并选择 URDF 路径?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return None
+
+        # 选择 URDF 文件
+        urdf_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择手 URDF 文件",
+            project_root,
+            "URDF 文件 (*.urdf)"
+        )
+        if not urdf_path:
+            return None
+
+        # 写入 YAML（尽量使用相对路径）
+        try:
+            rel_path = os.path.relpath(urdf_path, project_root)
+        except Exception:
+            rel_path = urdf_path
+
+        cfg = {
+            'urdf_path': rel_path,
+            'base_pose': {
+                'translation_m': [0.0, 0.0, 0.0],
+                'rpy_deg': [0.0, 0.0, 0.0],
+            },
+            'joints': 'default'
+        }
+
+        try:
+            with open(cfg_path, 'w') as f:
+                yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+            self.statusBar().showMessage(f"✓ 已创建手配置: {cfg_path}")
+            return cfg_path
+        except Exception as e:
+            QMessageBox.warning(self, "写入失败", f"无法写入配置文件:\n{e}")
+            return None
+
+    def on_hand_identity_loaded(self, hand_name: str) -> None:
+        """当 DataManager 发出手身份后，确保配置存在，再通知优化线程应用该配置。"""
+        import os
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        cfg_dir = os.path.join(project_root, 'hand_config')
+        self._ensure_hand_config(hand_name, cfg_dir, project_root)
+        # 继续让优化线程应用该 hand 的配置
+        self.optimization_thread.apply_hand_config(hand_name)
 
     def on_start_adjust_hand_anchor(self, anchor_index: int) -> None:
         """

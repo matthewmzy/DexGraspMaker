@@ -80,6 +80,9 @@ class DataManager(QObject):
     import_hand_pose_signal = pyqtSignal()
     export_hand_pose_signal = pyqtSignal()
 
+    # 新增：手身份（用于加载 hand_config/<name>.yaml）
+    hand_identity_loaded_signal = pyqtSignal(str)  # 发送手名称（URDF 基名）
+
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         
@@ -106,6 +109,13 @@ class DataManager(QObject):
         self.current_link_poses: dict[str, np.ndarray] = {}  # {link_name: 4x4 transform matrix}
         self.current_base_translation: list[float] | None = None
         self.current_base_rotation: list[list[float]] | None = None
+
+        # 6. 选择的手配置名（用于 hand_config 选择）
+        self.selected_hand_name: str | None = None
+
+    def set_selected_hand_name(self, name: str) -> None:
+        """设置当前手配置名（用于 hand_config/<name>.yaml 选择）。"""
+        self.selected_hand_name = name
 
     # --- 公共槽 (Public Slots) ---
     # 这些槽由 main_window 连接到 controls_widget 的信号
@@ -215,6 +225,14 @@ class DataManager(QObject):
             self.pyroki_robot = pk.Robot.from_urdf(self.urdf_obj)
             print("DataManager: pyroki.Robot 创建成功。")
 
+            # 发送手身份：优先使用选中的 hand 名称，否则使用 URDF 基名
+            try:
+                hand_identity = self.selected_hand_name or os.path.splitext(os.path.basename(file_path))[0]
+                self.hand_identity_loaded_signal.emit(hand_identity)
+                print(f"DataManager: 已发送手身份: {hand_identity}")
+            except Exception:
+                pass
+
             # 3. 提取 Link Meshes (用于 PyVista 可视化)
             trimesh_scene = self.urdf_obj.scene
             if trimesh_scene is None:
@@ -275,8 +293,6 @@ class DataManager(QObject):
                 # 转换为 PyVista 并存储
                 pv_mesh = pyvista.wrap(combined_mesh)
                 self.hand_links_mesh_dict[link_name] = pv_mesh
-
-            # debug_tm_scene.show()
 
             if not self.hand_links_mesh_dict:
                 raise ValueError("未能在 URDF 场景中提取任何 link meshes。")
@@ -747,13 +763,13 @@ class DataManager(QObject):
                 
                 # 基于体积确定采样点数
                 if volume < 10:
-                    num_points = 6
-                elif volume < 100:
-                    num_points = 8
-                elif volume < 1000:
                     num_points = 16
-                else:
+                elif volume < 100:
                     num_points = 32
+                elif volume < 1000:
+                    num_points = 100
+                else:
+                    num_points = 200
                 
                 # 使用FPS算法采样关键点
                 points = self._farthest_point_sampling(pv_mesh, num_points)
