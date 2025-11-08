@@ -53,4 +53,14 @@ SDF_DEFAULT_METHOD = 'signed'
 # 默认距离场分辨率（单位：米）。例如 0.002 = 2mm。
 SDF_DEFAULT_RESOLUTION_M = 0.004
 
+# ---------------- Mesh 简化配置 ----------------
+# 默认的最大面片数上限（超过则尝试简化到不高于此上限）。
+# 可通过环境变量覆盖：DGM_MAX_OBJECT_FACES, DGM_MAX_HAND_LINK_FACES
+MAX_OBJECT_FACES = 5000
+MAX_HAND_LINK_FACES = 1000
+
+# 简化与转换结果缓存目录（默认 .cache/mesh）
+# 可用环境变量 DGM_MESH_CACHE 指定。
+MESH_CACHE_DIR = ".cache/mesh"
+
 

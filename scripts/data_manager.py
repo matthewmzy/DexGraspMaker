@@ -22,7 +22,8 @@ from utils.sampling import farthest_point_sampling
 from utils.urdf_loading import load_urdf_and_robot, extract_link_meshes, compute_initial_link_poses
 
 # 常量
-from utils.constants import HAND_STATIC_PREFIX
+from utils.constants import HAND_STATIC_PREFIX, MAX_OBJECT_FACES, MAX_HAND_LINK_FACES
+from utils.mesh_simplify import simplify_with_cache, env_face_caps, _face_count
 from utils.keypoints import generate_keypoints
 from .anchor_manager import AnchorManager
 
@@ -150,6 +151,16 @@ class DataManager(QObject):
             if max(self.object_mesh.bounds_size) > 10: # 简单检查单位
                 print("DataManager: 物体尺寸较大，正在缩放至米级单位...")
                 self.object_mesh.scale(0.001, inplace=True)
+            # Mesh 简化（带缓存）
+            obj_cap, _ = env_face_caps(MAX_OBJECT_FACES, MAX_HAND_LINK_FACES)
+            faces_before = _face_count(self.object_mesh)
+            simplified, hit, cache_path = simplify_with_cache(self.object_mesh, obj_cap)
+            faces_after = _face_count(simplified)
+            if faces_after < faces_before:
+                ratio = 100.0 * (1.0 - float(faces_after)/max(1.0, float(faces_before)))
+                print(f"DataManager: 物体网格简化 {faces_before} -> {faces_after} 面 (-{ratio:.1f}%) cache={'HIT' if hit else 'MISS'} {cache_path}")
+                self.status_message_signal.emit(f"物体网格简化: {faces_before}->{faces_after} 面 ({'缓存命中' if hit else '已写入缓存'})")
+                self.object_mesh = simplified
             self.object_loaded_signal.emit(self.object_mesh)
             self.status_message_signal.emit(f"已加载物体: {file_path}")
             return True
@@ -180,6 +191,16 @@ class DataManager(QObject):
             if max(self.object_mesh.bounds_size) > 10: # 简单检查单位
                 print("DataManager: 物体尺寸较大，正在缩放至米级单位...")
                 self.object_mesh.scale(0.001, inplace=True)
+            # Mesh 简化（带缓存）
+            obj_cap, _ = env_face_caps(MAX_OBJECT_FACES, MAX_HAND_LINK_FACES)
+            faces_before = _face_count(self.object_mesh)
+            simplified, hit, cache_path = simplify_with_cache(self.object_mesh, obj_cap)
+            faces_after = _face_count(simplified)
+            if faces_after < faces_before:
+                ratio = 100.0 * (1.0 - float(faces_after)/max(1.0, float(faces_before)))
+                print(f"DataManager: 物体网格简化 {faces_before} -> {faces_after} 面 (-{ratio:.1f}%) cache={'HIT' if hit else 'MISS'} {cache_path}")
+                self.status_message_signal.emit(f"物体网格简化: {faces_before}->{faces_after} 面 ({'缓存命中' if hit else '已写入缓存'})")
+                self.object_mesh = simplified
             self.object_loaded_signal.emit(self.object_mesh)
             self.status_message_signal.emit(f"已加载物体: {file_path}")
         except Exception as e:
@@ -237,6 +258,27 @@ class DataManager(QObject):
             # 3. 提取 Link Meshes (用于 PyVista 可视化) via utils
             self.hand_links_mesh_dict = extract_link_meshes(self.urdf_obj, self.pyroki_robot)
             print(f"DataManager: 已提取 {len(self.hand_links_mesh_dict)} 个 link meshes。")
+            # 对每个 link mesh 进行简化（带缓存）
+            _, link_cap = env_face_caps(MAX_OBJECT_FACES, MAX_HAND_LINK_FACES)
+            simplified_links: dict[str, pyvista.PolyData] = {}
+            total_before = 0
+            total_after = 0
+            hits = 0
+            for lname, mesh in self.hand_links_mesh_dict.items():
+                faces_before = _face_count(mesh)
+                total_before += faces_before
+                simplified, hit, cache_path = simplify_with_cache(mesh, link_cap)
+                faces_after = _face_count(simplified)
+                total_after += faces_after
+                if faces_after < faces_before:
+                    ratio = 100.0 * (1.0 - float(faces_after)/max(1.0, float(faces_before)))
+                    print(f"DataManager: link '{lname}' 简化 {faces_before}->{faces_after} (-{ratio:.1f}%) cache={'HIT' if hit else 'MISS'} {cache_path}")
+                if hit:
+                    hits += 1
+                simplified_links[lname] = simplified
+            self.hand_links_mesh_dict = simplified_links
+            print(f"DataManager: 手链接简化汇总 总面数 {total_before}->{total_after} (-{(1-total_after/max(1,total_before))*100:.1f}%) 缓存命中 {hits}/{len(simplified_links)}")
+            self.status_message_signal.emit(f"手链接网格简化: {total_before}->{total_after} 面 (命中 {hits} 缓存)")
             self.hand_loaded_signal.emit(self.hand_links_mesh_dict)
 
             # 5. 发射 JAX-native robot

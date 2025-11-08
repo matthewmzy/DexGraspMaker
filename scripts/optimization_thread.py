@@ -109,6 +109,15 @@ class OptimizationThread(QThread):
         # 待应用的手配置名称（当 robot 尚未就绪时临时保存）
         self._pending_hand_config_name = None  # type: Optional[str]
 
+        # ---- UI 发射节流（缓解渲染卡顿）----
+        # 通过环境变量 DGM_UI_EMIT_INTERVAL_MS 控制最小发射间隔（毫秒）。
+        # 默认采用 33ms（约 30FPS），可根据机器性能调大/调小。
+        try:
+            self._emit_interval_ms = int(os.environ.get('DGM_UI_EMIT_INTERVAL_MS', '33'))
+        except Exception:
+            self._emit_interval_ms = 33
+        self._last_emit_ms = 0
+
     def stop(self) -> None:
         """
         请求线程停止。
@@ -381,9 +390,13 @@ class OptimizationThread(QThread):
                 base_rotation = self.current_base_pose[:3, :3].tolist()
                 joint_snapshot = dict(self.current_joint_values)
             
-            self.pose_update_signal.emit(link_poses_dict)
-            self.base_pose_updated_signal.emit(base_translation, base_rotation)
-            self.joint_values_updated_signal.emit(joint_snapshot)
+            # 仅在达到最小发射间隔时才推送到 UI，避免 UI 线程过载导致“未响应”
+            now_ms = int(time.time() * 1000)
+            if now_ms - self._last_emit_ms >= self._emit_interval_ms:
+                self.pose_update_signal.emit(link_poses_dict)
+                self.base_pose_updated_signal.emit(base_translation, base_rotation)
+                self.joint_values_updated_signal.emit(joint_snapshot)
+                self._last_emit_ms = now_ms
             
             self.msleep(OPTIMIZATION_SLEEP_MS)
             
