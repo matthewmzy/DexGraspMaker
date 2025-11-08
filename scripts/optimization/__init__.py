@@ -1,4 +1,4 @@
-# optimization/__init__.py
+# optimization/__init__.py (migrated)
 
 """
 优化模块：提供梯度优化和能量函数

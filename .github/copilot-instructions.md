@@ -3,12 +3,12 @@
 Interactive PyQt6 app for robotic grasp pose optimization. Three PyVista views (left/object, center/live hand, right/static hand). Data flows via Qt signals; optimization runs in a background thread with JAX/pyroki.
 
 Architecture (key files)
-- `interactive_gripper_tool/main.py`: entrypoint; parses `--load-default` and creates `MainWindow`.
-- `interactive_gripper_tool/main_window.py`: wires three `VistaWidget`s, `ControlsWidget`, `DataManager`, `OptimizationThread` via signals/slots.
-- `interactive_gripper_tool/vista_widget.py`: 3D view. Stores actors in a dict; update via `actor.user_matrix`. Emits `point_picked_signal({'actor_name', 'world_coord', 'relative_coord'})`.
-- `interactive_gripper_tool/data_manager.py`: state hub. Loads meshes/URDF, manages two-stage anchor picking, emits robot/link meshes/joint info/anchors.
-- `interactive_gripper_tool/optimization_thread.py`: QThread doing optimization + FK; emits link poses and updated base/joints at ~60 FPS.
-- `interactive_gripper_tool/optimization/*`: optimization primitives; see `optimization/README.md` for energy/optimizer APIs.
+- `scripts/main.py`: entrypoint; parses `--load-default` and creates `MainWindow`.
+- `scripts/main_window.py`: thin orchestrator; delegates UI build to `scripts/ui/ui_builder.py`, wiring to `scripts/ui/wiring.py`, pose/anchor updates to `scripts/ui/anchor_view.py`.
+- `scripts/vista_widget.py`: 3D view. Stores actors in a dict; update via `actor.user_matrix`. Emits `point_picked_signal({'actor_name', 'world_coord', 'relative_coord'})`.
+- `scripts/data_manager.py`: state hub. Loads meshes/URDF, manages anchor signals; anchor CRUD/picking delegated to `scripts/anchor_manager.py`.
+- `scripts/optimization_thread.py`: QThread doing optimization + FK; emits link poses and updated base/joints at ~60 FPS.
+- `scripts/optimization/*`: optimization primitives; see `scripts/optimization/README.md` for energy/optimizer APIs.
 
 Communication & naming contracts
 - Only use signals/slots across components (no direct method calls).
@@ -37,7 +37,7 @@ Optimization loop (defaults and where to change)
 - Picking is enabled per view; ensure `_picking_enabled` is true before expecting `point_picked_signal`.
 
 Developer workflows
-- Launch (recommended): `./run.sh` (sets OpenGL env, activates conda `dgm`, forwards args). Alt: `conda activate dgm && python interactive_gripper_tool/main.py`.
+- Launch (recommended): `./run.sh` (sets OpenGL env, activates conda `dgm`, forwards args). Alt: `conda activate dgm && python scripts/main.py`.
 - Quick validation: run with `--load-default` to auto-load test assets from `test_assets/`.
 - Tuning: edit energies/weights in `OptimizationThread._setup_optimization()`; switch optimizer via `set_optimizer(...)`.
 - Debugging: watch console prints and `status_message_signal` updates; detailed energies print every 30 steps.

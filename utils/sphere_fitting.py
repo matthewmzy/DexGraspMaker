@@ -1,4 +1,4 @@
-# sphere_fitting.py
+# sphere_fitting.py (migrated)
 """
 球体拟合算法集合，用于将3D网格近似为球体集合
 

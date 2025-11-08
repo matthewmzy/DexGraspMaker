@@ -1,4 +1,4 @@
-# optimization_thread.py
+# optimization_thread.py (migrated)
 
 import time
 import numpy as np
@@ -11,8 +11,8 @@ from jax import numpy as jnp
 import os
 import yaml
 
-# 导入优化模块
-from optimization import (
+# 导入优化模块（调整为相对导入）
+from .optimization import (
     OptimizerState,
     AnchorPointEnergy,
     JointLimitEnergy,
@@ -22,7 +22,17 @@ from optimization import (
     CompositeEnergy,
     create_adam,
 )
-from optimization.optimizer_state import DEFAULT_SCALE_FACTORS as OS_DEFAULT_SCALE_FACTORS
+from utils.constants import (
+    HAND_DYNAMIC_PREFIX,
+    ENERGY_WEIGHTS,
+    DEFAULT_LEARNING_RATE,
+    DEFAULT_CLIP_GRAD,
+    DEFAULT_SCALE_FACTORS,
+    OPTIMIZATION_SLEEP_MS,
+)
+from utils.geometry import euler_rpy_to_matrix
+from utils.diagnostics import format_energy_breakdown, pose_delta
+from utils.hand_config import load_hand_config, base_pose_from_cfg, init_joints_from_cfg
 
 
 class OptimizationThread(QThread):
@@ -80,7 +90,7 @@ class OptimizationThread(QThread):
         self.target_joint_values: dict[str, float] = {}
         
         # 5. 名称前缀 (必须与 main_window 中设置的一致)
-        self.actor_name_prefix = "dyn_hand_"
+        self.actor_name_prefix = HAND_DYNAMIC_PREFIX
         
         # 6. 优化器和能量函数
         self.optimizer = None
@@ -88,8 +98,10 @@ class OptimizationThread(QThread):
         self._setup_optimization()
 
         # 参数缩放因子（用于平衡旋转/平移/关节的梯度量级）
-        # 默认采用 OptimizerState.DEFAULT_SCALE_FACTORS，可在运行时通过 set_scale_factors 调整
-        self.scale_factors = dict(OS_DEFAULT_SCALE_FACTORS)
+        self.scale_factors = dict(DEFAULT_SCALE_FACTORS)
+
+        # 仅可视化的 link 名称集合 (用于抑制不存在 actor 的警告)
+        self._visual_link_names = set()
 
     def stop(self) -> None:
         """
@@ -143,10 +155,10 @@ class OptimizationThread(QThread):
         可以通过修改这个方法来切换不同的优化器和能量组合
         """
         # 创建能量函数
-        anchor_energy = AnchorPointEnergy(weight=1.0)
-        joint_limit_energy = JointLimitEnergy(weight=0.5, margin=0.1)
-        penetration_energy = PenetrationAvoidanceEnergy(weight=2.0, margin=0.0)  # 直接使用穿透距离
-        self_collision_energy = SelfCollisionAvoidanceEnergy(weight=0.3, margin=0.005)
+        anchor_energy = AnchorPointEnergy(weight=ENERGY_WEIGHTS['anchor'])
+        joint_limit_energy = JointLimitEnergy(weight=ENERGY_WEIGHTS['joint_limit'], margin=0.1)
+        penetration_energy = PenetrationAvoidanceEnergy(weight=ENERGY_WEIGHTS['penetration'], margin=0.0)
+        self_collision_energy = SelfCollisionAvoidanceEnergy(weight=ENERGY_WEIGHTS['self_collision'], margin=0.005)
         # collision_energy = CollisionAvoidanceEnergy(weight=0.1, margin=0.01)
         
         # 组合能量函数
@@ -160,8 +172,8 @@ class OptimizationThread(QThread):
         
         # 创建高性能 Optax Adam 优化器
         self.optimizer = create_adam(
-            learning_rate=0.01,
-            clip_grad=1.0
+            learning_rate=DEFAULT_LEARNING_RATE,
+            clip_grad=DEFAULT_CLIP_GRAD
         )
     
     def set_optimizer(self, optimizer_type: str = "adam", **kwargs):
@@ -172,7 +184,7 @@ class OptimizationThread(QThread):
             optimizer_type: "adam", "adamw", "lion", "sgd"
             **kwargs: 优化器参数
         """
-        from optimization import create_adamw, create_lion, GradientDescentOptimizer
+        from .optimization import create_adamw, create_lion, GradientDescentOptimizer
         
         with QMutexLocker(self.mutex):
             if optimizer_type.lower() == "adam":
@@ -214,19 +226,11 @@ class OptimizationThread(QThread):
                 print(f"OptimizationThread: 未找到 hand 配置文件，跳过初始化: {cfg_path}")
                 return
 
-            with open(cfg_path, 'r') as f:
-                cfg = yaml.safe_load(f) or {}
+            cfg = load_hand_config(cfg_path)
 
             base_pose_cfg = (cfg.get('base_pose') or {})
-            translation = base_pose_cfg.get('translation_m', [0.0, 0.0, 0.0])
-            rpy_deg = base_pose_cfg.get('rpy_deg', [0.0, 0.0, 0.0])
-
-            # 更新基座位姿
             with QMutexLocker(self.mutex):
-                self.current_base_pose = np.eye(4)
-                self.current_base_pose[:3, 3] = np.array(translation, dtype=float)
-                roll, pitch, yaw = [np.deg2rad(v) for v in rpy_deg]
-                self.current_base_pose[:3, :3] = self._euler_to_matrix(roll, pitch, yaw)
+                self.current_base_pose = base_pose_from_cfg(base_pose_cfg)
 
             # 关节初始化（需要 robot 已设置好以获取关节名与上下限）
             with QMutexLocker(self.mutex):
@@ -237,31 +241,8 @@ class OptimizationThread(QThread):
                     self.wait_condition.wakeAll()
                     return
 
-                joint_names = list(self.robot.joints.actuated_names)
-                lower_limits = self.robot.joints.lower_limits
-                upper_limits = self.robot.joints.upper_limits
-                mid_limits = (lower_limits + upper_limits) / 2.0
-
                 joints_cfg = cfg.get('joints', 'default')
-                new_joint_values = {}
-                if isinstance(joints_cfg, str) and joints_cfg.lower() == 'default':
-                    for i, name in enumerate(joint_names):
-                        new_joint_values[name] = float(mid_limits[i])
-                elif isinstance(joints_cfg, dict):
-                    for i, name in enumerate(joint_names):
-                        if name in joints_cfg:
-                            try:
-                                new_joint_values[name] = float(joints_cfg[name])
-                            except Exception:
-                                new_joint_values[name] = float(mid_limits[i])
-                                print(f"OptimizationThread: joints[{name}] 解析失败，改用中值。")
-                        else:
-                            new_joint_values[name] = float(mid_limits[i])
-                            print(f"OptimizationThread: joints 未提供 {name}，改用中值。")
-                else:
-                    # 不识别的类型，退回默认
-                    for i, name in enumerate(joint_names):
-                        new_joint_values[name] = float(mid_limits[i])
+                new_joint_values = init_joints_from_cfg(self.robot, joints_cfg)
 
                 # 应用到当前/目标
                 self.current_joint_values = new_joint_values.copy()
@@ -304,7 +285,6 @@ class OptimizationThread(QThread):
                     break # 收到停止信号
                 
                 # --- 2. 准备工作 (快照状态) ---
-                # 复制状态，以便我们可以在没有锁的情况下执行长时间的计算
                 local_anchors = list(self.anchor_pairs)
                 
                 is_optimizing = self._needs_optimization
@@ -326,16 +306,11 @@ class OptimizationThread(QThread):
                     
                 # 重置一次性触发器
                 self._manual_update = False
-                
-                # (锁在 'with' 块结束时自动释放)
 
-            # --- 3. 执行计算 (没有锁！) ---
-            # 这是此线程中耗时的部分
-            
+            # --- 3. 执行计算 ---
             try:
-                # A0. 首先处理可能存在的距离场预计算（在后台线程中执行，避免阻塞UI）
+                # A0. 处理距离场预计算
                 if local_precompute_mesh is not None:
-                    # 在能量函数中查找并预计算穿透避免的距离场
                     if hasattr(self.energy_function, 'energy_functions'):
                         for energy in self.energy_function.energy_functions:
                             if isinstance(energy, PenetrationAvoidanceEnergy):
@@ -345,22 +320,14 @@ class OptimizationThread(QThread):
                                 break
                 
                 if is_optimizing:
-                    # A. 运行一步梯度下降（真实优化）
                     new_pose, new_joints = self._optimization_step(
                         local_anchors, 
                         self.current_base_pose, 
                         self.current_joint_values
                     )
-                    
                 else:
-                    # B. 仅手动更新或空闲
-                    # 我们只需要使用当前状态运行FK
                     new_pose = self.current_base_pose
                     new_joints = self.current_joint_values
-                
-                
-                # C. 运行正向运动学 (FK)
-                # 无论哪种情况，我们都需要计算FK以进行可视化
                 
                 link_poses_dict = self._run_forward_kinematics(
                     new_pose, 
@@ -371,45 +338,34 @@ class OptimizationThread(QThread):
                 print(f"OptimizationThread: 计算错误: {e}")
                 import traceback
                 traceback.print_exc()
-                # 发生错误时，停止优化
                 with QMutexLocker(self.mutex):
                     self._needs_optimization = False
                 continue
 
             # --- 4. 更新状态并发射信号 ---
             with QMutexLocker(self.mutex):
-                # 将计算结果存回状态变量
                 self.current_base_pose = new_pose
                 self.current_joint_values = new_joints
                 base_translation = self.current_base_pose[:3, 3].tolist()
                 base_rotation = self.current_base_pose[:3, :3].tolist()
                 joint_snapshot = dict(self.current_joint_values)
             
-            # 发射信号 (没有锁！)
-            # 'vista_widget' 将接收此信号
             self.pose_update_signal.emit(link_poses_dict)
             self.base_pose_updated_signal.emit(base_translation, base_rotation)
             self.joint_values_updated_signal.emit(joint_snapshot)
             
-            # 休息 16ms (~60 FPS) 以产生平滑的动画效果
-            # 并防止 CPU 100% 占用
-            self.msleep(16)
+            self.msleep(OPTIMIZATION_SLEEP_MS)
             
         print("OptimizationThread: 线程已停止。")
 
-    # --- 公共槽 (Public Slots) ---
-    # 这些槽由 main_thread 调用 (通过信号连接)
+    # --- 公共槽 ---
 
     @pyqtSlot(list)
     def trigger_optimization(self, anchor_pairs: list) -> None:
-        """
-        槽：当锚点列表更新时，由 data_manager 调用。
-        """
         with QMutexLocker(self.mutex):
             self.anchor_pairs = anchor_pairs
             if self.anchor_pairs:
                 self._needs_optimization = True
-                # 每次开始新的优化时重置内部优化器状态，防止沿用旧的动量/状态
                 try:
                     if self.optimizer is not None:
                         self.optimizer.reset()
@@ -417,51 +373,34 @@ class OptimizationThread(QThread):
                     pass
                 print(f"OptimizationThread: 已收到 {len(anchor_pairs)} 个锚点，开始优化。")
             else:
-                self._needs_optimization = False # 没有锚点，停止优化
+                self._needs_optimization = False
                 print("OptimizationThread: 锚点列表为空，停止优化。")
-                
-            self.wait_condition.wakeAll() # 唤醒 'run' 循环
+            self.wait_condition.wakeAll()
 
     @pyqtSlot(object)
     def set_object_mesh(self, mesh) -> None:
-        """
-        设置物体网格，用于穿透避免计算
-        
-        Args:
-            mesh: pyvista.PolyData 或 trimesh.Trimesh 对象
-        """
         with QMutexLocker(self.mutex):
             self.object_mesh = mesh
-            # 将距离场预计算任务委派给本线程的后台处理，避免阻塞UI线程
             self._pending_precompute_mesh = mesh
             self.wait_condition.wakeAll()
-
             print(f"OptimizationThread: 已设置物体网格（预计算任务已入队）。顶点数: {len(mesh.points) if hasattr(mesh, 'points') else '未知'}")
     
     def set_pyroki_robot(self, robot: pk.Robot) -> None:
-        """
-        槽：当 data_manager 加载完 URDF 后调用。
-        """
         with QMutexLocker(self.mutex):
             if pk is None:
                 print("OptimizationThread: 错误: pyroki 未导入，无法设置 robot。")
                 return
-
             self.robot = robot
             if self.robot is None:
                 print("OptimizationThread: 警告: 收到了空的 Robot 对象。")
                 return
-
-            # 从 pyroki robot 初始化关节状态
             self.current_joint_values.clear()
             self.target_joint_values.clear()
-            
             try:
                 joint_names = self.robot.joints.actuated_names
                 lower_limits = self.robot.joints.lower_limits
                 upper_limits = self.robot.joints.upper_limits
                 average_limits = (lower_limits + upper_limits) / 2.0
-                # 创建关节信息列表，用于发送给 controls_widget
                 joint_info_list = []
                 for i, name in enumerate(joint_names):
                     joint_info = {
@@ -471,63 +410,43 @@ class OptimizationThread(QThread):
                         'default': float(average_limits[i])
                     }
                     joint_info_list.append(joint_info)
-
                 for i, name in enumerate(joint_names):
                     default_val = float(average_limits[i])
                     self.current_joint_values[name] = default_val
                     self.target_joint_values[name] = default_val
-                
                 print(f"OptimizationThread: 已成功设置 pyroki.Robot 实例。 关节: {list(self.current_joint_values.keys())}")
-                
-                # 发射关节信息信号给 controls_widget
                 self.joint_info_signal.emit(joint_info_list)
-                
-                # 加载新模型后，总是触发一次手动更新以显示初始姿势
                 self._manual_update = True
                 self.wait_condition.wakeAll()
-                
             except Exception as e:
                 print(f"OptimizationThread: 解析 pyroki.Robot 时出错: {e}")
-                self.robot = None # 设置失败
-
-            # 加载新模型后，如果存在锚点，则触发一次优化
+                self.robot = None
             if self.anchor_pairs:
                 self._needs_optimization = True
                 self.wait_condition.wakeAll()
 
+    @pyqtSlot(list)
+    def set_visual_link_names(self, link_names: list[str]) -> None:
+        """接收仅用于渲染的 link 名称集合，优化线程据此过滤 FK 输出。"""
+        with QMutexLocker(self.mutex):
+            self._visual_link_names = set(link_names)
+
     @pyqtSlot(dict)
     def set_hand_keypoints(self, keypoints: dict[str, np.ndarray]) -> None:
-        """
-        槽：当 data_manager 加载完关键点后调用。
-        
-        Args:
-            keypoints: {link_name: points_array} 字典
-        """
         with QMutexLocker(self.mutex):
             self.hand_keypoints = keypoints.copy()
-            
-            # 更新能量函数中的关键点
             if hasattr(self.energy_function, 'energy_functions'):
                 for energy in self.energy_function.energy_functions:
                     if isinstance(energy, PenetrationAvoidanceEnergy):
                         energy.set_key_points(self.hand_keypoints)
                         print(f"OptimizationThread: 已设置 {sum(len(points) for points in keypoints.values())} 个关键点到穿透避免能量函数")
                         break
-            
             print(f"OptimizationThread: 已接收手关键点，共 {len(keypoints)} 个link，{sum(len(points) for points in keypoints.values())} 个点")
 
     @pyqtSlot(dict)
     def set_link_spheres(self, spheres: dict[str, list]) -> None:
-        """
-        槽：当 data_manager 加载完link球体数据后调用。
-
-        Args:
-            spheres: {link_name: [(center, radius), ...]} 字典
-        """
         with QMutexLocker(self.mutex):
             self.link_spheres = spheres.copy()
-
-            # 更新能量函数中的球体数据
             if hasattr(self.energy_function, 'energies'):
                 for energy in self.energy_function.energies:
                     if isinstance(energy, SelfCollisionAvoidanceEnergy):
@@ -535,27 +454,21 @@ class OptimizationThread(QThread):
                         total_spheres = sum(len(sphere_list) for sphere_list in spheres.values())
                         print(f"OptimizationThread: 已设置 {total_spheres} 个球体到自碰撞避免能量函数")
                         break
-
             total_spheres = sum(len(sphere_list) for sphere_list in spheres.values())
             print(f"OptimizationThread: 已接收link球体，共 {len(spheres)} 个link，{total_spheres} 个球体")
 
     @pyqtSlot(str, float)
     def set_manual_joint(self, joint_name: str, value: float) -> None:
-        """
-        槽：当 controls_widget 中的滑块移动时调用。
-        """
         with QMutexLocker(self.mutex):
             if joint_name in self.target_joint_values:
                 self.target_joint_values[joint_name] = value
-                self._manual_update = True # 标记为手动更新
-                self._needs_optimization = False # 手动操作会覆盖优化
-                self._is_paused = True # 手动调节时暂停优化
-
-                self.wait_condition.wakeAll() # 唤醒 'run' 循环以应用FK
+                self._manual_update = True
+                self._needs_optimization = False
+                self._is_paused = True
+                self.wait_condition.wakeAll()
 
     @pyqtSlot(float, float, float)
     def set_base_translation(self, x: float, y: float, z: float) -> None:
-        """槽：从 UI 调整基座平移"""
         with QMutexLocker(self.mutex):
             self.current_base_pose[:3, 3] = np.array([x, y, z], dtype=float)
             self._manual_update = True
@@ -563,73 +476,27 @@ class OptimizationThread(QThread):
             self._is_paused = True
             self.wait_condition.wakeAll()
 
-    @staticmethod
-    def _euler_to_matrix(roll: float, pitch: float, yaw: float) -> np.ndarray:
-        """将 roll-pitch-yaw (按 ZYX 顺序) 转换为 3x3 旋转矩阵"""
-        cx, cy, cz = np.cos(roll), np.cos(pitch), np.cos(yaw)
-        sx, sy, sz = np.sin(roll), np.sin(pitch), np.sin(yaw)
-
-        R_x = np.array(
-            [[1.0, 0.0, 0.0],
-             [0.0, cx, -sx],
-             [0.0, sx, cx]]
-        )
-        R_y = np.array(
-            [[cy, 0.0, sy],
-             [0.0, 1.0, 0.0],
-             [-sy, 0.0, cy]]
-        )
-        R_z = np.array(
-            [[cz, -sz, 0.0],
-             [sz, cz, 0.0],
-             [0.0, 0.0, 1.0]]
-        )
-
-        return R_z @ R_y @ R_x
 
     @pyqtSlot(float, float, float)
     def set_base_rotation(self, roll: float, pitch: float, yaw: float) -> None:
-        """槽：从 UI 调整基座旋转（弧度）"""
         with QMutexLocker(self.mutex):
-            rotation_matrix = self._euler_to_matrix(roll, pitch, yaw)
+            rotation_matrix = euler_rpy_to_matrix(roll, pitch, yaw)
             self.current_base_pose[:3, :3] = rotation_matrix
             self._manual_update = True
             self._needs_optimization = False
             self._is_paused = True
             self.wait_condition.wakeAll()
 
-    # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-    # ▼▼▼▼▼▼ [真实优化实现] ▼▼▼▼▼▼
-    # ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-
     def _prepare_anchor_data(self, anchors: list[dict]) -> list[dict]:
-        """
-        准备锚点数据，添加 link 索引
-        
-        Args:
-            anchors: 原始锚点列表，包含 hand_link_name
-            
-        Returns:
-            处理后的锚点列表，添加了 hand_link_idx
-        """
         if not anchors or self.robot is None:
             return []
-        
         prepared_anchors = []
         link_names = self.robot.links.names
-        
         for anchor in anchors:
-            # 创建副本
             new_anchor = anchor.copy()
-            
-            # 查找 link 索引
             link_name = anchor.get('hand_link_name', '')
-            
-            # 移除可能的前缀（如果存在）
-            # data_manager 可能使用了 'static_hand_' 前缀
             if link_name.startswith('static_hand_'):
                 link_name = link_name[len('static_hand_'):]
-            
             try:
                 link_idx = link_names.index(link_name)
                 new_anchor['hand_link_idx'] = link_idx
@@ -637,7 +504,6 @@ class OptimizationThread(QThread):
             except ValueError:
                 print(f"OptimizationThread: 警告: 未找到 link '{link_name}'")
                 continue
-        
         return prepared_anchors
 
     def _optimization_step(self, 
@@ -645,38 +511,19 @@ class OptimizationThread(QThread):
                           current_pose: np.ndarray, 
                           current_joints: dict[str, float]
                           ) -> tuple[np.ndarray, dict[str, float]]:
-        """
-        执行一步优化（使用梯度下降和能量函数）
-        
-        Args:
-            anchors: 锚点对列表
-            current_pose: 当前基座位姿 (4x4 矩阵)
-            current_joints: 当前关节值字典
-            
-        Returns:
-            (new_pose, new_joints): 优化后的位姿和关节值
-        """
         if not anchors or self.robot is None or self.optimizer is None:
             return current_pose.copy(), current_joints.copy()
-        
-        # 1. 准备锚点数据（添加 link 索引）
         prepared_anchors = self._prepare_anchor_data(anchors)
-        
         if not prepared_anchors:
             print("OptimizationThread: 没有有效的锚点，跳过优化")
             return current_pose.copy(), current_joints.copy()
-        
-        # 2. 创建优化状态
         joint_names = self.robot.joints.actuated_names
-        
         state = OptimizerState.from_numpy(
             current_pose,
             current_joints,
             joint_names,
             self.scale_factors
         )
-        
-        # 3. 定义损失函数
         def loss_fn(opt_state):
             return self.energy_function.compute(
                 opt_state,
@@ -684,179 +531,64 @@ class OptimizationThread(QThread):
                 anchor_pairs=prepared_anchors,
                 object_mesh=self.object_mesh
             )
-        
-        # 4. 执行一步优化
         try:
             new_state, loss_value = self.optimizer.step(state, loss_fn)
-            
-            # 可选：打印损失值用于调试
             if hasattr(self, '_step_counter'):
                 self._step_counter += 1
             else:
                 self._step_counter = 0
-            
-            if self._step_counter % 30 == 0:  # 每30步打印一次
-                # 获取详细能量
+            if self._step_counter % 30 == 0:
                 detailed_energies = self.energy_function.compute_detailed(
                     new_state, self.robot, anchor_pairs=prepared_anchors, object_mesh=self.object_mesh
                 )
-                energy_str = ", ".join([f"{k}: {v:.4f}" for k, v in detailed_energies.items()])
+                energy_str = format_energy_breakdown(detailed_energies)
                 print(f"OptimizationThread: Step {self._step_counter}, Total Loss: {loss_value:.4f} ({energy_str})")
-            
-            # 5. 转换回 NumPy 格式
             new_pose = np.array(new_state.to_base_pose_matrix())
             new_joints = new_state.to_joint_dict()
-
-            # 调试（每30步）：打印参数步长，便于观察缩放因子效果
             if self._step_counter % 30 == 0:
                 try:
                     old_pose = np.array(state.to_base_pose_matrix())
-                    dt = np.linalg.norm(new_pose[:3, 3] - old_pose[:3, 3])
-                    # 粗略角度差估计：通过旋转矩阵迹
-                    R_old = old_pose[:3, :3]
-                    R_new = new_pose[:3, :3]
-                    cos_theta = (np.trace(R_old.T @ R_new) - 1.0) / 2.0
-                    cos_theta = np.clip(cos_theta, -1.0, 1.0)
-                    dtheta = float(np.arccos(cos_theta))
-                    print(f"OptimizationThread: Δtrans={dt:.6f} m, Δrot={np.degrees(dtheta):.3f} deg (scaled via {self.scale_factors})")
+                    dt, drot = pose_delta(old_pose, new_pose)
+                    print(f"OptimizationThread: Δtrans={dt:.6f} m, Δrot={drot:.3f} deg (scaled via {self.scale_factors})")
                 except Exception:
                     pass
-            
             return new_pose, new_joints
-            
         except Exception as e:
             print(f"OptimizationThread: 优化步骤失败: {e}")
             import traceback
             traceback.print_exc()
             return current_pose.copy(), current_joints.copy()
 
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-    # ▲▲▲▲▲▲ [真实优化实现结束] ▲▲▲▲▲▲
-    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
-    
     def _run_forward_kinematics(self, 
                                 base_pose_mat: np.ndarray, 
                                 joint_values_dict: dict[str, float]
                                 ) -> dict[str, np.ndarray]:
-        """
-        [真实实现] 使用 pyroki 运行正向运动学 (FK)。
-        
-        这个函数用于*可视化*，所以它在 QThread 中运行，
-        但不需要在 JAX @jit 内部。
-        """
         if self.robot is None or jaxlie is None:
             if self.robot is None: print("FK GZ: Robot not set")
             if jaxlie is None: print("FK GZ: Jaxlie not set")
             return {}
-
         try:
-            # 1. 将关节字典 {name: val} 转换为有序数组 [val1, val2, ...]
             ordered_joint_names = self.robot.joints.actuated_names
-            
-            # 确保 joint_values_dict 已经包含了所有需要的关节
             if not all(name in joint_values_dict for name in ordered_joint_names):
-                # print("FK 警告: 关节值尚未完全初始化。")
-                return {} # 尚未准备好
-
+                return {}
             cfg_array = jnp.array(
                 [joint_values_dict[name] for name in ordered_joint_names]
             )
-
-            # 2. 调用 pyroki FK。返回 (link_count, 7)
             link_poses_rel_root_wxyz = self.robot.forward_kinematics(cfg_array)
-            
-            # 3. 获取优化的基座位姿 (4x4 NumPy -> jaxlie.SE3)
             T_world_base = jaxlie.SE3.from_matrix(base_pose_mat)
-            
-            # 4. 转换并应用基座位姿
             link_poses_dict = {}
-            link_names = self.robot.links.names # pyroki 存储的 link name 列表
-            
+            link_names = self.robot.links.names
             for i, link_name in enumerate(link_names):
+                # 如果提供了可视化 link 集，且当前 link 不在其中则跳过
+                if self._visual_link_names and link_name not in self._visual_link_names:
+                    continue
                 actor_name = self.actor_name_prefix + link_name
-                
-                # 获取 link i 相对于 root 的位姿
                 T_root_link = jaxlie.SE3(link_poses_rel_root_wxyz[i])
-                
-                # 计算 link 在世界坐标系下的最终位姿
                 T_world_link = T_world_base @ T_root_link
-                
-                # 转换为 4x4 矩阵以进行可视化
                 link_poses_dict[actor_name] = np.array(T_world_link.as_matrix())
-                
             return link_poses_dict
-            
         except Exception as e:
             print(f"OptimizationThread: FK 计算失败: {e}")
             import traceback
             traceback.print_exc()
             return {}
-
-
-# --- 用于独立测试 ---
-# (独立测试代码保持不变，但会因缺少 set_hand_model 而失败)
-# (你需要更新它以使用 set_pyroki_robot)
-if __name__ == '__main__':
-    from PyQt6.QtWidgets import QApplication, QPushButton, QWidget, QVBoxLayout
-    
-    app = QApplication([])
-    
-    print("测试 OptimizationThread...")
-    thread = OptimizationThread()
-    
-    # [修改] 测试代码需要更新
-    print("注意: 独立测试代码需要更新以使用 'set_pyroki_robot'")
-    print("      你必须提供一个真实的 pk.Robot 对象来进行测试。")
-    print("      跳过 set_hand_model 测试。")
-    
-    # 2. 模拟设置模型 (已过时)
-    # test_links = {"base": None, "link1": None, "link2": None}
-    # test_joints = [
-    #     {'name': 'j1', 'min': -1, 'max': 1, 'default': 0},
-    #     {'name': 'j2', 'min': -1, 'max': 1, 'default': 0}
-    # ]
-    # thread.set_hand_model(test_links, test_joints) 
-    
-    # 3. 连接信号
-    def on_pose_update(poses: dict):
-        print(f"--- [UI 线程] 收到位姿更新 (共 {len(poses)} 个 links) ---")
-        if poses:
-            name, pose = list(poses.items())[0]
-            print(f"  (示例) {name}: T=({pose[0:3, 3][0]:.3f}, ...)")
-            
-    thread.pose_update_signal.connect(on_pose_update)
-    thread.start()
-    
-    # 5. 模拟 UI 交互
-    def test_optimization():
-        print("\n--- [UI 线程] 触发优化 (将失败，因为 robot=None) ---")
-        anchors = [{'hand_point': [0.1, 0.0, 0.0], 'obj_point': [1.0, 0.5, 0.2]}]
-        thread.trigger_optimization(anchors)
-        
-    def test_manual_joint():
-        print("\n--- [UI 线程] 触发手动关节 (将失败，因为 robot=None) ---")
-        thread.set_manual_joint('j1', 0.5)
-
-    def stop_thread():
-        print("\n--- [UI 线程] 停止线程 ---")
-        thread.stop()
-        thread.wait(1000)
-        app.quit()
-
-    window = QWidget()
-    layout = QVBoxLayout(window)
-    btn_opt = QPushButton("1. 触发优化 (将失败)")
-    btn_man = QPushButton("2. 设置关节 'j1' = 0.5 (将失败)")
-    btn_stop = QPushButton("3. 停止线程并退出")
-    
-    btn_opt.clicked.connect(test_optimization)
-    btn_man.clicked.connect(test_manual_joint)
-    btn_stop.clicked.connect(stop_thread)
-    
-    layout.addWidget(btn_opt)
-    layout.addWidget(btn_man)
-    layout.addWidget(btn_stop)
-    
-    window.show()
-    app.exec()

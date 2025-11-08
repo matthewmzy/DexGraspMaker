@@ -8,4 +8,4 @@ export LIBGL_DRIVERS_PATH=/usr/lib/x86_64-linux-gnu/dri
 # Activate conda environment and run the application
 eval "$(conda shell.bash hook)"
 conda activate dgm
-python interactive_gripper_tool/main.py "$@"
+python scripts/main.py "$@"

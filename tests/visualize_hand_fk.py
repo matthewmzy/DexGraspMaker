@@ -26,16 +26,17 @@ import argparse
 import json
 from typing import Dict, List, Tuple
 
-# 添加路径
-sys.path.append('interactive_gripper_tool')
-sys.path.append('thirdparty/pyroki/src')
+# 添加路径：项目根与第三方库
+repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, repo_root)
+sys.path.append(os.path.join(repo_root, 'thirdparty/pyroki/src'))
 
 import numpy as np
 import trimesh
 import yourdfpy
 import jax.numpy as jnp
 import jaxlie
-from interactive_gripper_tool.sphere_fitting import load_link_spheres
+from scripts.sphere_fitting import load_link_spheres
 import pyroki as pk
 import open3d as o3d
 

@@ -8,7 +8,7 @@
             "name": "main",
             "type": "debugpy",
             "request": "launch",
-            "program": "${cwd}/interactive_gripper_tool/main.py",
+            "program": "${cwd}/scripts/main.py",
             "console": "integratedTerminal",
             "env": {
                 "LD_PRELOAD": "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",

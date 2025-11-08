@@ -1,5 +1,4 @@
-# optimization/optimizer_state.py
-
+# optimization/optimizer_state.py (migrated)
 """
 优化器状态：存储优化变量和参数
 """

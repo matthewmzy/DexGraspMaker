@@ -1,4 +1,4 @@
-# keyboard_controller.py
+# keyboard_controller.py (migrated)
 # 键盘控制模块，用于调整锚点位置
 
 import numpy as np

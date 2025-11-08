@@ -7,6 +7,8 @@ SDF可视化测试脚本
 """
 
 import numpy as np
+import pytest
+pytestmark = pytest.mark.skip(reason="Visualization/interactive SDF test; run manually")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import trimesh
@@ -17,7 +19,7 @@ import os
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from interactive_gripper_tool.optimization.energy_functions import PenetrationAvoidanceEnergy
+from scripts.optimization.energy_functions import PenetrationAvoidanceEnergy
 
 def visualize_sdf_slices(energy, mesh, num_slices=5):
     """

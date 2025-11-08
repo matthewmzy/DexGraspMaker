@@ -16,8 +16,15 @@ import trimesh
 import yourdfpy
 import pyroki as pk
 
-# 导入球体拟合模块
-from sphere_fitting import generate_link_spheres, save_link_spheres, load_link_spheres
+# 导入球体拟合模块（使用相对导入）
+from utils.sphere_fitting import generate_link_spheres, save_link_spheres, load_link_spheres
+from utils.sampling import farthest_point_sampling
+from utils.urdf_loading import load_urdf_and_robot, extract_link_meshes, compute_initial_link_poses
+
+# 常量
+from utils.constants import HAND_STATIC_PREFIX
+from utils.keypoints import generate_keypoints
+from .anchor_manager import AnchorManager
 
 # -------------------------------------------------------------------
 
@@ -96,22 +103,18 @@ class DataManager(QObject):
         # 2. 存储 pyroki robot 实例
         self.pyroki_robot: pk.Robot | None = None
         
-        # 3. 锚点状态
-        self.anchor_pairs: list[dict] = []
+        # 3. 锚点状态与拾取状态机（委托给 AnchorManager）
+        self.anchor_manager = AnchorManager()
+        self.anchor_pairs = self.anchor_manager.anchor_pairs  # reference
+        self._current_pick_stage = 'hand'  # 沿用阶段提示逻辑（非强依赖）
 
-        # 4. 拾取状态机
-        self.is_picking_mode: bool = False
-        self._current_pick_stage: str = 'hand' # 'hand' 或 'object'
-        self._temp_hand_anchor: dict | None = None # 存储临时的手部点信息
-        self._temp_object_anchor: dict | None = None # 存储临时的物体点信息
+        # 4. 当前link姿态 (用于锚点调整)
+        self.current_link_poses = {}  # {link_name: 4x4 transform matrix}
+        self.current_base_translation = None
+        self.current_base_rotation = None
 
-        # 5. 当前link姿态 (用于锚点调整)
-        self.current_link_poses: dict[str, np.ndarray] = {}  # {link_name: 4x4 transform matrix}
-        self.current_base_translation: list[float] | None = None
-        self.current_base_rotation: list[list[float]] | None = None
-
-        # 6. 选择的手配置名（用于 hand_config 选择）
-        self.selected_hand_name: str | None = None
+        # 5. 选择的手配置名（用于 hand_config 选择）
+        self.selected_hand_name = None
 
     def set_selected_hand_name(self, name: str) -> None:
         """设置当前手配置名（用于 hand_config/<name>.yaml 选择）。"""
@@ -217,13 +220,9 @@ class DataManager(QObject):
         try:
             # 1. 使用 yourdfpy 加载 URDF
             # yourdfpy 会自动处理 package:// 路径并加载 trimesh 场景
-            print(f"DataManager: 正在使用 yourdfpy 加载: {file_path}")
-            self.urdf_obj = yourdfpy.URDF.load(file_path)
-            
-            # 2. 使用 pyroki 创建 JAX-native Robot
-            print("DataManager: 正在创建 pyroki.Robot 实例...")
-            self.pyroki_robot = pk.Robot.from_urdf(self.urdf_obj)
-            print("DataManager: pyroki.Robot 创建成功。")
+            print(f"DataManager: 正在加载 URDF & Robot: {file_path}")
+            self.urdf_obj, self.pyroki_robot = load_urdf_and_robot(file_path)
+            print("DataManager: URDF & Robot 加载成功。")
 
             # 发送手身份：优先使用选中的 hand 名称，否则使用 URDF 基名
             try:
@@ -233,70 +232,8 @@ class DataManager(QObject):
             except Exception:
                 pass
 
-            # 3. 提取 Link Meshes (用于 PyVista 可视化)
-            trimesh_scene = self.urdf_obj.scene
-            if trimesh_scene is None:
-                raise ValueError("yourdfpy 未能加载场景 (urdf_obj.scene 为空)。")
-
-            self.hand_links_mesh_dict.clear()
-            
-            scene_graph = trimesh_scene.graph
-            transform_graph = scene_graph.transforms
-            all_node_data = scene_graph.transforms.node_data
-
-            geometry_dict = trimesh_scene.geometry
-
-            # debug_tm_scene = trimesh.Scene()
-
-            for link_name in self.pyroki_robot.links.names:
-                if link_name not in transform_graph.nodes:
-                    print(f"DataManager: 警告: Pyroki link '{link_name}' 不在 trimesh 场景图中。")
-                    continue
-
-                link_meshes = []
-                # 查找作为此 link_name 子节点的所有 "visual" 节点
-                # (link_name) -> (visual_name)
-                child_nodes = [to_node for from_node, to_node in transform_graph.edge_data if from_node == link_name]
-                for child_node_name in child_nodes:
-                    # 从 all_node_data (而不是 graph) 访问节点数据
-                    if child_node_name in all_node_data and "geometry" in all_node_data[child_node_name]:
-                        
-                        geom_key = all_node_data[child_node_name]["geometry"]
-                        if geom_key not in geometry_dict:
-                            print(f"DataManager: 警告: 找不到 '{geom_key}' (来自 {child_node_name}) 的几何体。")
-                            continue
-                            
-                        trimesh_geom = geometry_dict[geom_key]
-                        
-                        transform_matrix = scene_graph.get(child_node_name, link_name)[0]
-
-                        if hasattr(trimesh_geom, 'to_mesh'):
-                            # 如果是 Box, Sphere, Cylinder，调用 .to_mesh()
-                            trimesh_mesh = trimesh_geom.to_mesh()
-                        else:
-                            trimesh_mesh = trimesh_geom.copy()
-
-                        trimesh_mesh.apply_transform(transform_matrix)
-                        link_meshes.append(trimesh_mesh)
-
-                if not link_meshes:
-                    continue # 此 link 没有可视化 meshes
-                
-                # 将此 link 的所有 visual meshes 合并为一个
-                if len(link_meshes) > 1:
-                    combined_mesh = trimesh.util.concatenate(link_meshes)
-                else:
-                    combined_mesh = link_meshes[0]
-
-                # debug_tm_scene.add_geometry(combined_mesh)
-
-                # 转换为 PyVista 并存储
-                pv_mesh = pyvista.wrap(combined_mesh)
-                self.hand_links_mesh_dict[link_name] = pv_mesh
-
-            if not self.hand_links_mesh_dict:
-                raise ValueError("未能在 URDF 场景中提取任何 link meshes。")
-
+            # 3. 提取 Link Meshes (用于 PyVista 可视化) via utils
+            self.hand_links_mesh_dict = extract_link_meshes(self.urdf_obj, self.pyroki_robot)
             print(f"DataManager: 已提取 {len(self.hand_links_mesh_dict)} 个 link meshes。")
             self.hand_loaded_signal.emit(self.hand_links_mesh_dict)
 
@@ -305,26 +242,8 @@ class DataManager(QObject):
 
             # 4. 计算并
             print("DataManager: 正在计算初始姿态 (Default FK)...")
-            initial_poses = {}
-            base_link_name = self.urdf_obj.base_link
-            scene_graph = self.urdf_obj.scene.graph
-
-            # 我们需要为 hand_links_mesh_dict 中的每个 link 计算其全局姿态
-            # 注意：urdf_obj.scene.graph 已经包含了默认姿态的变换
-            for link_name in self.hand_links_mesh_dict.keys():
-                try:
-                    # 获取 T_world_link (其中 'world' 是 base_link)
-                    transform_matrix = scene_graph.get(link_name, base_link_name)[0]
-                    initial_poses[link_name] = transform_matrix
-                except:
-                    # 这可能发生在 link_name == base_link_name 时
-                    if link_name == base_link_name:
-                        initial_poses[link_name] = np.eye(4)
-                    else:
-                        print(f"DataManager: 警告: 无法获取 '{link_name}' 相对于 '{base_link_name}' 的变换。")
-            
+            initial_poses = compute_initial_link_poses(self.urdf_obj, self.hand_links_mesh_dict)
             print(f"DataManager: 已计算 {len(initial_poses)} 个 links 的初始姿态。")
-            # 发射初始姿态
             self.hand_initial_pose_signal.emit(initial_poses)
 
             # 5. 生成或加载关键点
@@ -351,10 +270,11 @@ class DataManager(QObject):
         注意：新设计中，每次添加锚点对后不会自动关闭拾取模式，
         用户可以连续添加多个锚点对
         """
-        self.is_picking_mode = is_active
-        self._temp_hand_anchor = None
-        self._temp_object_anchor = None
-        
+        if is_active:
+            self.anchor_manager.start_picking()
+        else:
+            self.anchor_manager.stop_picking()
+
         self.picking_mode_changed_signal.emit(is_active)
         self.anchor_pair_ready_signal.emit(False)  # 隐藏确定按钮
         
@@ -368,13 +288,13 @@ class DataManager(QObject):
         """
         当在右侧视窗（手部）点击时调用
         """
-        if not self.is_picking_mode:
+        if not self.anchor_manager.is_picking_mode:
             return
         
         actor_name = pick_data['actor_name']
         
-        # main_window 中设置了前缀 "static_hand_"
-        prefix = "static_hand_" 
+        # main_window 中设置了前缀 常量 HAND_STATIC_PREFIX
+        prefix = HAND_STATIC_PREFIX 
         if actor_name.startswith(prefix):
              link_name = actor_name[len(prefix):]
         else:
@@ -387,19 +307,21 @@ class DataManager(QObject):
              self.status_message_signal.emit(f"错误: 拾取到未知 link '{link_name}'。")
              return
 
-        self._temp_hand_anchor = {
-            'world_coord': pick_data['world_coord'],
-            'local_coord': pick_data.get('relative_coord', pick_data['world_coord']),
-            'link_name': link_name
-        }
-        print(f"DataManager: 已拾取手部点: link={link_name}, 局部坐标={self._temp_hand_anchor['local_coord']}")
+        self.anchor_manager.set_hand_temp(
+            pick_data['world_coord'],
+            pick_data.get('relative_coord', pick_data['world_coord']),
+            link_name
+        )
+        if self.anchor_manager._temp_hand_anchor:
+            print(f"DataManager: 已拾取手部点: link={link_name}, 局部坐标={self.anchor_manager._temp_hand_anchor['local_coord']}")
         
         # 显示临时锚点
-        self.show_temp_anchor_signal.emit({
-            'type': 'hand',
-            'point': self._temp_hand_anchor['world_coord'],
-            'link_name': link_name
-        })
+        if self.anchor_manager._temp_hand_anchor:
+            self.show_temp_anchor_signal.emit({
+                'type': 'hand',
+                'point': self.anchor_manager._temp_hand_anchor['world_coord'],
+                'link_name': link_name
+            })
         
         # 检查是否可以显示确定按钮
         self._check_anchor_pair_ready()
@@ -411,14 +333,14 @@ class DataManager(QObject):
         
         改进：只存储物体点，等待用户确认后再创建锚点对
         """
-        if not self.is_picking_mode:
+        if not self.anchor_manager.is_picking_mode:
             return
             
         # 1. 存储物体点
-        self._temp_object_anchor = {
-            'world_coord': pick_data['world_coord'],
-            'local_coord': pick_data.get('relative_coord', pick_data['world_coord'])
-        }
+        self.anchor_manager.set_object_temp(
+            pick_data['world_coord'],
+            pick_data.get('relative_coord', pick_data['world_coord'])
+        )
         
         print(f"DataManager: 已拾取物体点: 世界坐标={self._temp_object_anchor['world_coord']}")
         
@@ -435,12 +357,12 @@ class DataManager(QObject):
         """
         检查锚点对是否准备好，更新UI状态
         """
-        if self._temp_hand_anchor is not None and self._temp_object_anchor is not None:
+        if self.anchor_manager.pair_ready():
             self.anchor_pair_ready_signal.emit(True)
             self.status_message_signal.emit("✓ 两个点都已选定！点击「确定」按钮添加锚点对，或继续选择其他点覆盖当前选择。")
-        elif self._temp_hand_anchor is not None:
-            self.status_message_signal.emit(f"✓ 手部点已选定 ({self._temp_hand_anchor['link_name']})。请在任意视窗选择物体对应点。")
-        elif self._temp_object_anchor is not None:
+        elif self.anchor_manager._temp_hand_anchor is not None:
+            self.status_message_signal.emit(f"✓ 手部点已选定 ({self.anchor_manager._temp_hand_anchor['link_name']})。请在任意视窗选择物体对应点。")
+        elif self.anchor_manager._temp_object_anchor is not None:
             self.status_message_signal.emit("✓ 物体点已选定。请在任意视窗选择手部对应点。")
         else:
             self.status_message_signal.emit("请在任意视窗点击选择第一个点（手或物体均可）。")
@@ -450,27 +372,10 @@ class DataManager(QObject):
         """
         确认添加锚点对
         """
-        if not self.is_picking_mode or self._temp_hand_anchor is None or self._temp_object_anchor is None:
+        ok, new_pair = self.anchor_manager.confirm_pair()
+        if not ok:
             return
-            
-        # 1. 创建锚点对
-        new_pair = {
-            'hand_point': self._temp_hand_anchor['world_coord'],
-            'hand_point_local': self._temp_hand_anchor['local_coord'],
-            'hand_link_name': self._temp_hand_anchor['link_name'],
-            'obj_point': self._temp_object_anchor['world_coord'],
-            'obj_point_local': self._temp_object_anchor['local_coord'],
-            'enabled': True
-        }
-        
-        # 2. 添加到列表
-        self.anchor_pairs.append(new_pair)
         print(f"DataManager: 已创建新锚点对 #{len(self.anchor_pairs)}: {new_pair}")
-        
-        # 3. 重置状态机并退出拾取模式
-        self._temp_hand_anchor = None
-        self._temp_object_anchor = None
-        self.is_picking_mode = False
         
         # 4. 隐藏确定按钮
         self.anchor_pair_ready_signal.emit(False)
@@ -491,23 +396,21 @@ class DataManager(QObject):
         """
         取消添加锚点对
         """
-        if not self.is_picking_mode:
+        if not self.anchor_manager.is_picking_mode:
             return
-            
+
         # 1. 清空临时状态
-        self._temp_hand_anchor = None
-        self._temp_object_anchor = None
-        self.is_picking_mode = False
-        
+        self.anchor_manager.cancel()
+
         # 2. 隐藏确定按钮
         self.anchor_pair_ready_signal.emit(False)
-        
+
         # 3. 发射信号关闭拾取模式
         self.picking_mode_changed_signal.emit(False)
-        
+
         # 4. 清空所有视窗的锚点球体
         self.clear_temp_anchors_signal.emit()
-        
+
         self.status_message_signal.emit("已取消添加锚点对。")
 
     @pyqtSlot(int)
@@ -516,7 +419,7 @@ class DataManager(QObject):
         删除指定的锚点对，并立即触发优化更新
         """
         if 0 <= row_index < len(self.anchor_pairs):
-            removed = self.anchor_pairs.pop(row_index)
+            removed = self.anchor_manager.delete(row_index)
             print(f"DataManager: 已删除锚点 #{row_index+1}: {removed}")
             
             # 立即触发优化更新
@@ -536,7 +439,7 @@ class DataManager(QObject):
         :param enabled: True=启用, False=禁用
         """
         if 0 <= row_index < len(self.anchor_pairs):
-            self.anchor_pairs[row_index]['enabled'] = enabled
+            self.anchor_manager.toggle(row_index, enabled)
             status = "启用" if enabled else "禁用"
             print(f"DataManager: 已{status}锚点对 #{row_index+1}")
             
@@ -578,22 +481,7 @@ class DataManager(QObject):
         :param position: 新位置 [x, y, z] (对于hand是局部坐标，对于object是世界坐标)
         """
         if 0 <= anchor_index < len(self.anchor_pairs):
-            if point_type == "hand":
-                # 手部锚点：直接更新局部坐标，世界坐标会在下一帧pose更新时自动计算
-                self.anchor_pairs[anchor_index]['hand_point_local'] = position
-                
-                # 立即计算并更新世界坐标（用于一致性）
-                link_name = self.anchor_pairs[anchor_index]['hand_link_name']
-                if link_name in self.current_link_poses:
-                    T_world_link = self.current_link_poses[link_name]
-                    local_pos_homogeneous = np.append(position, 1.0)
-                    world_pos = (T_world_link @ local_pos_homogeneous)[:3]
-                    self.anchor_pairs[anchor_index]['hand_point'] = world_pos.tolist()
-                    
-            elif point_type == "object":
-                # 物体锚点：直接使用世界坐标
-                self.anchor_pairs[anchor_index]['obj_point'] = position
-                self.anchor_pairs[anchor_index]['obj_point_local'] = position
+            self.anchor_manager.update_position(anchor_index, point_type, position, self.current_link_poses)
             
             print(f"DataManager: 已更新锚点对 #{anchor_index+1} 的 {point_type} 点位置: {position}")
             
@@ -630,7 +518,7 @@ class DataManager(QObject):
                 
                 # 更新关节值
                 for joint_name, value in joint_values.items():
-                    if joint_name in self.optimization_thread.target_joint_values:
+                    if getattr(self, 'optimization_thread', None) and joint_name in self.optimization_thread.target_joint_values:
                         self.optimization_thread.set_manual_joint(joint_name, float(value))
                 
                 self.status_message_signal.emit(f"✓ 已导入手姿态：{len(joint_values)} 个关节")
@@ -646,8 +534,10 @@ class DataManager(QObject):
         
         # 获取当前关节值
         from datetime import datetime
+        pose_source = getattr(self, 'optimization_thread', None)
+        current_joint_values = pose_source.current_joint_values.copy() if pose_source else {}
         current_pose = {
-            'joint_values': self.optimization_thread.current_joint_values.copy(),
+            'joint_values': current_joint_values,
             'timestamp': datetime.now().isoformat()
         }
         
@@ -749,83 +639,12 @@ class DataManager(QObject):
         
         :return: {link_name: points_array} 字典
         """
-        hand_keypoints = {}
-        
-        for link_name, pv_mesh in self.hand_links_mesh_dict.items():
-            # 计算网格体积 (cm³)
-            try:
-                # PyVista mesh 体积计算
-                volume = pv_mesh.volume * 1e6  # 转换为 cm³ (PyVista使用米)
-                if volume <= 0:
-                    # 如果体积计算失败，使用边界框体积作为近似
-                    bounds = pv_mesh.bounds
-                    volume = (bounds[1] - bounds[0]) * (bounds[3] - bounds[2]) * (bounds[5] - bounds[4]) * 1e6
-                
-                # 基于体积确定采样点数
-                if volume < 10:
-                    num_points = 16
-                elif volume < 100:
-                    num_points = 32
-                elif volume < 1000:
-                    num_points = 100
-                else:
-                    num_points = 200
-                
-                # 使用FPS算法采样关键点
-                points = self._farthest_point_sampling(pv_mesh, num_points)
-                hand_keypoints[link_name] = points
-                
-                print(f"DataManager: {link_name} (体积: {volume:.1f} cm³) -> {num_points} 个关键点")
-                
-            except Exception as e:
-                print(f"DataManager: 为 {link_name} 生成关键点失败: {e}")
-                # 使用边界框中心作为后备
-                bounds = pv_mesh.bounds
-                center = np.array([
-                    (bounds[0] + bounds[1]) / 2,
-                    (bounds[2] + bounds[3]) / 2,
-                    (bounds[4] + bounds[5]) / 2
-                ])
-                hand_keypoints[link_name] = center.reshape(1, -1)
-                print(f"DataManager: 为 {link_name} 使用边界框中心作为关键点")
-        
-        return hand_keypoints
+        # 委托到 utils.keypoints
+        return generate_keypoints(self.hand_links_mesh_dict)
 
     def _farthest_point_sampling(self, pv_mesh: pyvista.PolyData, num_points: int) -> np.ndarray:
-        """
-        使用最远点采样(FPS)算法从网格采样关键点
-        
-        :param pv_mesh: PyVista网格
-        :param num_points: 采样点数
-        :return: 采样点数组 (N, 3)
-        """
-        # 获取网格顶点
-        vertices = pv_mesh.points
-        
-        if len(vertices) == 0:
-            raise ValueError("网格没有顶点")
-        
-        if len(vertices) <= num_points:
-            return vertices
-        
-        # 初始化：选择第一个点（随机或几何中心）
-        selected_indices = [0]  # 从第一个顶点开始
-        min_distances = np.full(len(vertices), np.inf)
-        
-        for _ in range(1, num_points):
-            # 计算所有点到已选点的最近距离
-            for i, selected_idx in enumerate(selected_indices):
-                distances = np.linalg.norm(vertices - vertices[selected_idx], axis=1)
-                min_distances = np.minimum(min_distances, distances)
-            
-            # 选择距离最远的点
-            farthest_idx = np.argmax(min_distances)
-            selected_indices.append(farthest_idx)
-            
-            # 重置该点的距离为0
-            min_distances[farthest_idx] = 0
-        
-        return vertices[selected_indices]
+        """委托到 utils.sampling.farthest_point_sampling 实现。"""
+        return farthest_point_sampling(pv_mesh, num_points)
 
     def _generate_or_load_link_spheres(self, urdf_path: str) -> None:
         """
@@ -884,15 +703,18 @@ if __name__ == '__main__':
     dm.set_picking_mode(True)
     
     # 模拟手部拾取
-    dm.on_hand_point_picked({'actor_name': 'hand_link_1', 'world_coord': [0.1, 0.2, 0.3]})
+    dm.on_hand_point_picked({'actor_name': HAND_STATIC_PREFIX + 'hand_link_1', 'world_coord': [0.1, 0.2, 0.3]})
     
     # 模拟物体拾取
     dm.on_object_point_picked({'actor_name': 'object', 'world_coord': [1.0, 1.1, 1.2]})
     
+    assert len(dm.anchor_pairs) == 0  # 现在只设置临时点，需确认
+    
+    # 确认添加
+    dm.confirm_anchor_pair()
     assert len(dm.anchor_pairs) == 1
     assert dm.anchor_pairs[0]['hand_link_name'] == 'hand_link_1'
     assert dm.anchor_pairs[0]['obj_point'] == [1.0, 1.1, 1.2]
-    assert dm._current_pick_stage == 'hand' # 检查是否重置
     
     print("锚点添加测试通过。")
     
@@ -900,16 +722,5 @@ if __name__ == '__main__':
     dm.on_delete_anchor(0)
     assert len(dm.anchor_pairs) == 0
     print("锚点删除测试通过。")
-    
-    # 3. 测试文件加载 (手动)
-    # print("测试加载物体 (将打开对话框)...")
-    # dm.load_object()
-    # assert dm.object_mesh is not None
-    # print("物体加载测试通过。")
-    
-    # print("测试加载机械手 (将打开对话框)...")
-    # dm.load_hand()
-    # assert len(dm.hand_links_mesh_dict) > 0
-    # print("机械手加载测试通过。")
     
     print("DataManager 单元测试完成 (文件加载需手动验证)。")

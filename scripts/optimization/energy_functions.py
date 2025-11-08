@@ -1,4 +1,4 @@
-# optimization/energy_functions.py
+# optimization/energy_functions.py (migrated)
 
 """
 能量函数模块：定义各种优化目标
