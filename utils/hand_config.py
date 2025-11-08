@@ -40,6 +40,40 @@ def ensure_hand_config(hand_name: str, cfg_dir: str, project_root: str, parent: 
     if reply != QMessageBox.StandardButton.Yes:
         return None
 
+    # 选择 URDF 文件
+    urdf_path, _ = QFileDialog.getOpenFileName(
+        parent,
+        "选择手 URDF 文件",
+        project_root,
+        "URDF 文件 (*.urdf)"
+    )
+    if not urdf_path:
+        return None
+
+    # 生成配置并写入
+    cfg_path = os.path.join(cfg_dir, f"{hand_name}.yaml")
+    try:
+        rel_path = os.path.relpath(urdf_path, project_root)
+    except Exception:
+        rel_path = urdf_path
+
+    cfg = dict(DEFAULT_HAND_CONFIG)
+    cfg['urdf_path'] = rel_path
+
+    try:
+        with open(cfg_path, 'w') as f:
+            yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
+        # 友好提示
+        try:
+            if parent is not None and hasattr(parent, 'statusBar'):
+                parent.statusBar().showMessage(f"✓ 已创建手配置: {cfg_path}")
+        except Exception:
+            pass
+        return cfg_path
+    except Exception as e:
+        QMessageBox.warning(parent, "写入失败", f"无法写入配置文件:\n{e}")
+        return None
+
 
 def load_hand_config(cfg_path: str) -> Dict:
     """Load YAML config file into a dict (empty dict on failure)."""
@@ -80,33 +114,3 @@ def init_joints_from_cfg(robot, joints_cfg) -> Dict[str, float]:
         for i, n in enumerate(names):
             result[n] = float(mid[i])
     return result
-
-    urdf_path, _ = QFileDialog.getOpenFileName(
-        parent,
-        "选择手 URDF 文件",
-        project_root,
-        "URDF 文件 (*.urdf)"
-    )
-    if not urdf_path:
-        return None
-
-    try:
-        rel_path = os.path.relpath(urdf_path, project_root)
-    except Exception:
-        rel_path = urdf_path
-
-    cfg = dict(DEFAULT_HAND_CONFIG)
-    cfg['urdf_path'] = rel_path
-
-    try:
-        with open(cfg_path, 'w') as f:
-            yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
-        if parent is not None and hasattr(parent, 'statusBar'):
-            try:
-                parent.statusBar().showMessage(f"✓ 已创建手配置: {cfg_path}")
-            except Exception:
-                pass
-        return cfg_path
-    except Exception as e:
-        QMessageBox.warning(parent, "写入失败", f"无法写入配置文件:\n{e}")
-        return None

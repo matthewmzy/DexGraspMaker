@@ -100,7 +100,6 @@ class VistaWidget(QWidget):
         
         if camera_reset:
             self.plotter.reset_camera()
-        print(f"VistaWidget: 已加载 actor '{name}'。")
 
     def load_hand(self, links_dict_data: dict[str, pyvista.PolyData], 
                   name_prefix: str = "", camera_reset: bool = True, **kwargs) -> None: # [修改] 1. 添加 camera_reset 参数

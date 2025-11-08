@@ -4,7 +4,7 @@
 urdf_path: test_assets/shadow/shadow_hand_right.urdf
 
 base_pose:
-  translation_m: [0.0, 0.0, 0.0]
+  translation_m: [0.0, 0.0, -0.5]
   rpy_deg: [0.0, 0.0, 0.0]
 
 # Initialize joints: use "default" midpoint policy or specify per-joint radians

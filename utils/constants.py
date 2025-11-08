@@ -26,18 +26,31 @@ OPTIMIZATION_SLEEP_MS = 16  # ~60 FPS
 ENERGY_WEIGHTS = {
     'anchor': 1.0,
     'joint_limit': 0.5,
-    'penetration': 2.0,
+    'penetration': 0.5,
     'self_collision': 0.3,
 }
 
 # Optimizer defaults
-DEFAULT_LEARNING_RATE = 0.05
+DEFAULT_LEARNING_RATE = 0.01
 DEFAULT_CLIP_GRAD = 1.0
 
 # Scale factors (used by OptimizationThread.set_scale_factors)
 DEFAULT_SCALE_FACTORS = {
-    'rotation': 0.5,    # make rotation relatively easier than translation if translation=1.0
+    'rotation': 2.0,    # make rotation relatively easier than translation if translation=1.0
     'translation': 1.0,
-    'joints': 1.0,
+    'joints': 0.1,
 }
+
+# ---------------- SDF / 距离场配置 ----------------
+# 支持的计算方法：
+#   'fast'   - 体素占据 + 欧氏距离变换 (EDT) + 内外判定，速度快，近似精度取决于分辨率
+#   'signed' - 基于 trimesh.proximity.signed_distance 逐点采样，精度高但耗时长
+SDF_SUPPORTED_METHODS = ('fast', 'signed')
+
+# 默认方法（全局可切换）；若需要更精确穿透深度，可改为 'signed'
+SDF_DEFAULT_METHOD = 'signed'
+
+# 默认距离场分辨率（单位：米）。例如 0.002 = 2mm。
+SDF_DEFAULT_RESOLUTION_M = 0.004
+
 

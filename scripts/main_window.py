@@ -113,19 +113,25 @@ class MainWindow(QMainWindow):
 		# 获取下一个锚点对的颜色
 		next_index = len(self.data_manager.anchor_pairs)
 		color_rgb = self.controls_widget.get_anchor_color(next_index)
-        
+
+		# 兼容：AnchorManager 负责临时锚点，DataManager 不再直接持有 _temp_hand_anchor / _temp_object_anchor
+		anchor_mgr = getattr(self.data_manager, 'anchor_manager', None)
+		if anchor_mgr is None:
+			return
+
 		# 先清除所有临时锚点
 		self._clear_temp_anchors()
-        
-		# 显示所有已选择的临时锚点
-		if self.data_manager._temp_hand_anchor:
-			point = self.data_manager._temp_hand_anchor['world_coord']
+
+		# 显示手部临时锚点
+		if anchor_mgr._temp_hand_anchor:
+			point = anchor_mgr._temp_hand_anchor['world_coord']
 			self.view_left.add_temp_anchor(point, color_rgb, True)
 			self.view_right.add_temp_anchor(point, color_rgb, True)
 			self.view_center.add_temp_anchor(point, color_rgb, True)
-        
-		if self.data_manager._temp_object_anchor:
-			point = self.data_manager._temp_object_anchor['world_coord']
+
+		# 显示物体临时锚点
+		if anchor_mgr._temp_object_anchor:
+			point = anchor_mgr._temp_object_anchor['world_coord']
 			self.view_left.add_temp_anchor(point, color_rgb, False)
 			self.view_right.add_temp_anchor(point, color_rgb, False)
 			self.view_center.add_temp_anchor(point, color_rgb, False)
@@ -196,7 +202,16 @@ class MainWindow(QMainWindow):
 		# 从 hand_config/<selected_hand>.yaml 读取 URDF 路径（如不存在则回退到 shadow）
 		cfg_dir = os.path.join(project_root, 'hand_config')
 		selected = getattr(self, 'selected_hand', 'shadow') or 'shadow'
+		# 关键修复: 在加载 URDF 之前告知 DataManager 选中的 hand 名称，
+		# 这样 DataManager 不会使用 URDF 基名 (shadow_hand_right) 作为 hand identity，
+		# 而是正确发射 'shadow'，从而匹配 hand_config/shadow.yaml。
+		try:
+			print(f"MainWindow: 计划使用手配置名 selected_hand='{selected}' 用于 hand_config/<name>.yaml")
+			self.data_manager.set_selected_hand_name(selected)
+		except Exception:
+			pass
 		cfg_path = ensure_hand_config(selected, cfg_dir, project_root, parent=self)
+		print(f"MainWindow: ensure_hand_config 返回: {cfg_path}")
 		if not cfg_path:
 			# Fallback to default.yaml if user skipped creation
 			cfg_path = os.path.join(cfg_dir, 'default.yaml')
@@ -213,6 +228,7 @@ class MainWindow(QMainWindow):
 		print(f"自动加载默认资源...")
 		print(f"  物体: {object_path}")
 		print(f"  手部: {hand_path}")
+		print("MainWindow: 将加载默认资源并等待 DataManager 发射 hand_identity → 优化线程应用 hand_config → FK 更新。")
         
 		# 使用QTimer延迟加载，确保UI已完全初始化
 		def delayed_load():
@@ -295,8 +311,11 @@ class MainWindow(QMainWindow):
 		current_dir = os.path.dirname(os.path.abspath(__file__))
 		project_root = os.path.dirname(current_dir)
 		cfg_dir = os.path.join(project_root, 'hand_config')
-		ensure_hand_config(hand_name, cfg_dir, project_root, parent=self)
+		print(f"MainWindow: on_hand_identity_loaded 收到 hand_name='{hand_name}'，调用 ensure_hand_config")
+		cfg_path = ensure_hand_config(hand_name, cfg_dir, project_root, parent=self)
+		print(f"MainWindow: ensure_hand_config 返回路径: {cfg_path}")
 		# 继续让优化线程应用该 hand 的配置
+		print(f"MainWindow: 调用 optimization_thread.apply_hand_config('{hand_name}')")
 		self.optimization_thread.apply_hand_config(hand_name)
 
 	def on_start_adjust_hand_anchor(self, anchor_index: int) -> None:

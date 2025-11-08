@@ -221,12 +221,14 @@ class DataManager(QObject):
             # 1. 使用 yourdfpy 加载 URDF
             # yourdfpy 会自动处理 package:// 路径并加载 trimesh 场景
             print(f"DataManager: 正在加载 URDF & Robot: {file_path}")
+            print(f"DataManager: 当前 selected_hand_name={self.selected_hand_name}")
             self.urdf_obj, self.pyroki_robot = load_urdf_and_robot(file_path)
             print("DataManager: URDF & Robot 加载成功。")
 
             # 发送手身份：优先使用选中的 hand 名称，否则使用 URDF 基名
             try:
                 hand_identity = self.selected_hand_name or os.path.splitext(os.path.basename(file_path))[0]
+                print(f"DataManager: 发射 hand_identity_loaded_signal('{hand_identity}')")
                 self.hand_identity_loaded_signal.emit(hand_identity)
                 print(f"DataManager: 已发送手身份: {hand_identity}")
             except Exception:
@@ -342,13 +344,16 @@ class DataManager(QObject):
             pick_data.get('relative_coord', pick_data['world_coord'])
         )
         
-        print(f"DataManager: 已拾取物体点: 世界坐标={self._temp_object_anchor['world_coord']}")
+        # 临时锚点状态已迁移到 anchor_manager
+        if self.anchor_manager._temp_object_anchor:
+            print(f"DataManager: 已拾取物体点: 世界坐标={self.anchor_manager._temp_object_anchor['world_coord']}")
         
         # 显示临时锚点
-        self.show_temp_anchor_signal.emit({
-            'type': 'object',
-            'point': self._temp_object_anchor['world_coord']
-        })
+        if self.anchor_manager._temp_object_anchor:
+            self.show_temp_anchor_signal.emit({
+                'type': 'object',
+                'point': self.anchor_manager._temp_object_anchor['world_coord']
+            })
         
         # 2. 检查是否可以显示确定按钮
         self._check_anchor_pair_ready()
@@ -384,7 +389,9 @@ class DataManager(QObject):
         self.clear_temp_anchors_signal.emit()
         
         # 6. 发射信号触发优化
-        self.new_anchor_pair_signal.emit(self.anchor_pairs)
+        # 仅发射已启用的锚点，过滤 disabled
+        active_pairs = [p for p in self.anchor_pairs if p.get('enabled', True)]
+        self.new_anchor_pair_signal.emit(active_pairs)
         self.anchor_list_updated_signal.emit(self.anchor_pairs)
         self.picking_mode_changed_signal.emit(False)
         
@@ -423,7 +430,8 @@ class DataManager(QObject):
             print(f"DataManager: 已删除锚点 #{row_index+1}: {removed}")
             
             # 立即触发优化更新
-            self.new_anchor_pair_signal.emit(self.anchor_pairs)
+            active_pairs = [p for p in self.anchor_pairs if p.get('enabled', True)]
+            self.new_anchor_pair_signal.emit(active_pairs)
             self.anchor_list_updated_signal.emit(self.anchor_pairs)
             
             self.status_message_signal.emit(f"✓ 锚点对 #{row_index+1} 已删除，优化已更新。")
@@ -444,7 +452,8 @@ class DataManager(QObject):
             print(f"DataManager: 已{status}锚点对 #{row_index+1}")
             
             # 立即触发优化更新
-            self.new_anchor_pair_signal.emit(self.anchor_pairs)
+            active_pairs = [p for p in self.anchor_pairs if p.get('enabled', True)]
+            self.new_anchor_pair_signal.emit(active_pairs)
             self.anchor_list_updated_signal.emit(self.anchor_pairs)
             
             self.status_message_signal.emit(f"✓ 锚点对 #{row_index+1} 已{status}，优化已更新。")
@@ -486,7 +495,8 @@ class DataManager(QObject):
             print(f"DataManager: 已更新锚点对 #{anchor_index+1} 的 {point_type} 点位置: {position}")
             
             # 立即触发优化更新（只发给优化线程，不重建UI列表）
-            self.new_anchor_pair_signal.emit(self.anchor_pairs)
+            active_pairs = [p for p in self.anchor_pairs if p.get('enabled', True)]
+            self.new_anchor_pair_signal.emit(active_pairs)
             # 注意：不发射 anchor_list_updated_signal 以避免重建UI列表和重置按钮状态
             
             self.status_message_signal.emit(f"✓ 锚点对 #{anchor_index+1} 的 {point_type} 点已更新，优化已重新开始。")

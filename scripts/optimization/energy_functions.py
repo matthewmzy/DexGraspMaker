@@ -10,12 +10,18 @@ import jax
 import jax.numpy as jnp
 import jaxlie
 import numpy as np
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from abc import ABC, abstractmethod
 import trimesh
 import trimesh.proximity
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
+import hashlib  # 保留旧接口的向后兼容（若外部还在调用旧方法）
+import json
+from pathlib import Path
+import os
+from utils.sdf_manager import SDFManager, SDFParams
+from utils.constants import SDF_DEFAULT_METHOD, SDF_SUPPORTED_METHODS, SDF_DEFAULT_RESOLUTION_M
 
 
 class EnergyFunction(ABC):
@@ -106,23 +112,44 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
     
     def __init__(self, weight: float = 1.0, margin: float = 0.001, 
                  hand_key_points: Dict[str, np.ndarray] = None,
-                 resolution: float = 0.002):  # 2mm分辨率
+                 resolution: Optional[float] = None,  # 若为 None，使用全局默认常量
+                 cache_enabled: bool = True,
+                 cache_dir: Optional[str] = None,
+                 max_cells_per_dim: Optional[int] = None,  # 已弃用，保留参数不再生效
+                 padding_ratio: float = 0.05,
+                 sdf_method: Optional[str] = None):
         """
         Args:
             weight: 能量权重
             margin: 安全距离（米），距离小于此值时开始施加惩罚
             hand_key_points: 手部关键点字典 {link_name: points_array}
             resolution: 距离场分辨率（米）
+            cache_enabled: 是否启用SDF缓存
+            cache_dir: 缓存目录，默认使用项目根目录下 .cache/sdf
+            max_cells_per_dim: 单维度最大网格单元数（用于限制内存）
+            padding_ratio: 边界框向外扩展的比例
         """
         self.weight = weight
         self.margin = margin
         self.hand_key_points = hand_key_points
-        self.resolution = resolution
-        
-        # 距离场数据
-        self.distance_field = None
-        self.field_bounds = None
-        self.field_shape = None
+        self.resolution = resolution if (resolution is not None) else SDF_DEFAULT_RESOLUTION_M
+        self.cache_enabled = cache_enabled
+        self.padding_ratio = padding_ratio
+        # 新的 SDF 管理器封装
+        self._sdf_manager = SDFManager(cache_dir=cache_dir, enabled=cache_enabled)
+        # SDF 计算方法（'fast' 或 'signed'），优先使用传入参数，否则使用全局默认
+        if sdf_method is None:
+            sdf_method = SDF_DEFAULT_METHOD
+        if sdf_method not in SDF_SUPPORTED_METHODS:
+            print(f"PenetrationAvoidanceEnergy: 未知的 sdf_method={sdf_method}，回退到默认 {SDF_DEFAULT_METHOD}")
+            sdf_method = SDF_DEFAULT_METHOD
+        self.sdf_method = sdf_method
+
+        # 距离场数据（运行态）
+        self.distance_field: Optional[np.ndarray] = None
+        self.field_bounds: Optional[np.ndarray] = None
+        self.field_shape: Optional[Tuple[int,int,int]] = None
+        self._last_cache_hit: Optional[bool] = None
     
     def set_key_points(self, key_points: Dict[str, np.ndarray]):
         """
@@ -133,12 +160,15 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
         """
         self.hand_key_points = key_points
     
-    def precompute_distance_field(self, mesh):
+    # 旧私有缓存方法移除，改用 SDFManager
+
+    def precompute_distance_field(self, mesh, mesh_source: Optional[str] = None, abort_fn: Optional[callable] = None):
         """
         预计算物体的距离场
         
         Args:
             mesh: trimesh.Trimesh 或 pyvista.PolyData 对象
+            mesh_source: 原始网格来源（文件路径或标识字符串），用于提示与调试
         """
         if mesh is None:
             return
@@ -159,7 +189,24 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
                 print("PenetrationAvoidanceEnergy: 不支持的网格格式")
                 return
         
-        # 获取边界框
+        # 使用 SDFManager 计算或加载，根据 self.sdf_method 选择具体实现
+        params = SDFParams(resolution=self.resolution, padding_ratio=self.padding_ratio, version=1, method=self.sdf_method)
+        distance_field, bounds, shape, cache_hit = self._sdf_manager.compute_or_load(
+            tri_mesh, params, mesh_source=mesh_source, abort_fn=abort_fn
+        )
+        self.distance_field = distance_field
+        self.field_bounds = bounds
+        self.field_shape = shape
+        self._last_cache_hit = cache_hit
+        if cache_hit:
+            print(f"PenetrationAvoidanceEnergy: 命中缓存（形状={shape}）。")
+            return
+        if mesh_source:
+            print(f"PenetrationAvoidanceEnergy: 新生成SDF method={self.sdf_method} (源: {mesh_source}) 形状={shape}")
+        else:
+            print(f"PenetrationAvoidanceEnergy: 新生成SDF method={self.sdf_method} 形状={shape}")
+
+        # 以下日志与统计保留（无需重复计算生成逻辑，这里直接输出范围）
         bounds = tri_mesh.bounds
         # 确保bounds是numpy数组
         if not isinstance(bounds, np.ndarray):
@@ -169,50 +216,11 @@ class PenetrationAvoidanceEnergy(EnergyFunction):
         if bounds.shape == (6,):
             bounds = bounds.reshape(2, 3)
         
-        self.field_bounds = bounds  # 直接保存numpy数组
-        
-        # 计算网格尺寸 - 使用更紧致的边界框
-        size = bounds[1] - bounds[0]
-        max_size = np.max(size)
-        
-        # 创建3D网格，只在物体边界框内，添加小padding
-        padding = max_size * 0.05  # 5% padding而不是10%
-        grid_bounds = np.array([
-            bounds[0] - padding,
-            bounds[1] + padding
-        ])
-        
-        # 计算网格分辨率
-        grid_size = grid_bounds[1] - grid_bounds[0]
-        num_cells = np.maximum(5, np.ceil(grid_size / self.resolution).astype(int))  # 至少5个单元
-        
-        # 限制最大网格尺寸以避免内存溢出 - 更保守的限制
-        max_cells_per_dim = 30  # 从100降低到30
-        num_cells = np.minimum(num_cells, max_cells_per_dim)
-        
-        # 确保num_cells是数组
-        if np.isscalar(num_cells):
-            num_cells = np.array([num_cells, num_cells, num_cells])
-        
-        self.field_shape = tuple(num_cells)
-        
-        print(f"PenetrationAvoidanceEnergy: 预计算距离场，网格大小: {self.field_shape}, 边界框: {grid_bounds}")
-        
-        # 生成查询点
-        x = np.linspace(grid_bounds[0, 0], grid_bounds[1, 0], num_cells[0])
-        y = np.linspace(grid_bounds[0, 1], grid_bounds[1, 1], num_cells[1])
-        z = np.linspace(grid_bounds[0, 2], grid_bounds[1, 2], num_cells[2])
-        
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        query_points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
-        
-        # 计算距离场
-        signed_distances = trimesh.proximity.signed_distance(tri_mesh, query_points)
-        
-        # 重塑为3D数组
-        self.distance_field = signed_distances.reshape(self.field_shape)
-        
-        print(f"PenetrationAvoidanceEnergy: 距离场预计算完成，范围: [{signed_distances.min():.4f}, {signed_distances.max():.4f}]")
+        try:
+            signed_distances = self.distance_field.ravel()
+            print(f"PenetrationAvoidanceEnergy: 距离场范围: [{signed_distances.min():.4f}, {signed_distances.max():.4f}]")
+        except Exception:
+            pass
     
     def _query_distance_field(self, points: jnp.ndarray) -> jnp.ndarray:
         """

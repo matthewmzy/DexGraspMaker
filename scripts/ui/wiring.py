@@ -63,6 +63,8 @@ def connect_all(mw, anchors):
     mw.data_manager.new_anchor_pair_signal.connect(mw.optimization_thread.trigger_optimization)
     mw.data_manager.new_anchor_pair_signal.connect(mw.on_new_anchor_pair_auto_start)
     mw.optimization_thread.pose_update_signal.connect(anchors.on_pose_update_with_anchors)
+    # 额外：SDF缓存提示 -> 状态栏消息
+    mw.optimization_thread.sdf_cache_message_signal.connect(mw.data_manager.status_message_signal.emit)
 
     # 7. Visualization settings
     mw.controls_widget.visualization_settings_changed_signal.connect(mw.on_visualization_changed)

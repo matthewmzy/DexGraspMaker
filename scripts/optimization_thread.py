@@ -2,6 +2,7 @@
 
 import time
 import numpy as np
+from typing import Optional
 from PyQt6.QtCore import (
     QThread, QMutex, QWaitCondition, pyqtSignal, pyqtSlot, QMutexLocker, QObject
 )
@@ -50,6 +51,8 @@ class OptimizationThread(QThread):
     base_pose_updated_signal = pyqtSignal(list, list)
     joint_values_updated_signal = pyqtSignal(dict)
     joint_info_signal = pyqtSignal(list)
+    # 新增：SDF缓存事件提示（命中或生成）
+    sdf_cache_message_signal = pyqtSignal(str)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -102,6 +105,9 @@ class OptimizationThread(QThread):
 
         # 仅可视化的 link 名称集合 (用于抑制不存在 actor 的警告)
         self._visual_link_names = set()
+
+        # 待应用的手配置名称（当 robot 尚未就绪时临时保存）
+        self._pending_hand_config_name = None  # type: Optional[str]
 
     def stop(self) -> None:
         """
@@ -226,23 +232,30 @@ class OptimizationThread(QThread):
                 print(f"OptimizationThread: 未找到 hand 配置文件，跳过初始化: {cfg_path}")
                 return
 
+            print(f"OptimizationThread: 准备加载 hand_config 文件: {cfg_path} (hand_name请求='{hand_name}') robot_ready={self.robot is not None}")
             cfg = load_hand_config(cfg_path)
+            print(f"OptimizationThread: hand_config 内容: {cfg}")
 
             base_pose_cfg = (cfg.get('base_pose') or {})
             with QMutexLocker(self.mutex):
                 self.current_base_pose = base_pose_from_cfg(base_pose_cfg)
+                print(f"OptimizationThread: 已设置 current_base_pose 平移={self.current_base_pose[:3,3].tolist()}")
 
             # 关节初始化（需要 robot 已设置好以获取关节名与上下限）
             with QMutexLocker(self.mutex):
                 if self.robot is None:
-                    print("OptimizationThread: 警告: Robot 尚未设置，无法应用 hand_config 关节初始化。")
-                    # 仍然触发一次 FK 以更新基座
+                    # Robot 尚未就绪，记录待应用配置名称，等 set_pyroki_robot 后再应用
+                    self._pending_hand_config_name = hand_name
+                    print("OptimizationThread: Robot 尚未设置，记录 _pending_hand_config_name，等待 set_pyroki_robot 后再次 apply。")
+                    # 仍然触发一次 FK 以更新基座位姿（若需要）
                     self._manual_update = True
                     self.wait_condition.wakeAll()
                     return
 
                 joints_cfg = cfg.get('joints', 'default')
+                print(f"OptimizationThread: 准备初始化关节，joints_cfg 类型={type(joints_cfg)}")
                 new_joint_values = init_joints_from_cfg(self.robot, joints_cfg)
+                print(f"OptimizationThread: 生成初始关节字典，大小={len(new_joint_values)} 示例={(list(new_joint_values.items())[:3])}")
 
                 # 应用到当前/目标
                 self.current_joint_values = new_joint_values.copy()
@@ -254,7 +267,11 @@ class OptimizationThread(QThread):
                 self._needs_optimization = False
                 self.wait_condition.wakeAll()
 
-            print(f"OptimizationThread: 已应用 hand_config 初始化: {os.path.basename(cfg_path)}")
+            try:
+                bt = self.current_base_pose[:3, 3].tolist()
+                print(f"OptimizationThread: hand_config 应用完成: {os.path.basename(cfg_path)} 基座平移={bt} 关节数={len(self.current_joint_values)}")
+            except Exception as _e_dbg:
+                print(f"OptimizationThread: hand_config 应用完成(获取平移失败): {os.path.basename(cfg_path)} err={_e_dbg}")
         except Exception as e:
             print(f"OptimizationThread: 应用 hand_config 失败: {e}")
 
@@ -315,7 +332,21 @@ class OptimizationThread(QThread):
                         for energy in self.energy_function.energy_functions:
                             if isinstance(energy, PenetrationAvoidanceEnergy):
                                 print("OptimizationThread: 正在后台预计算物体距离场 (SDF)…")
-                                energy.precompute_distance_field(local_precompute_mesh)
+                                # 提供中断回调用于窗口关闭时尽快结束预计算
+                                energy.precompute_distance_field(
+                                    local_precompute_mesh,
+                                    abort_fn=lambda: (not self._is_running)
+                                )
+                                # 根据能量对象的 _last_cache_hit 输出 UI 友好提示
+                                hit = getattr(energy, '_last_cache_hit', None)
+                                if hit is True:
+                                    msg = "命中物体SDF缓存，已快速加载距离场。"
+                                elif hit is False:
+                                    msg = "已生成物体SDF并写入缓存。"
+                                else:
+                                    msg = "物体距离场处理完成。"
+                                print(f"OptimizationThread: {msg}")
+                                self.sdf_cache_message_signal.emit(msg)
                                 print("OptimizationThread: 物体距离场预计算完成。")
                                 break
                 
@@ -424,6 +455,16 @@ class OptimizationThread(QThread):
             if self.anchor_pairs:
                 self._needs_optimization = True
                 self.wait_condition.wakeAll()
+
+        # Robot 就绪后，如果之前有待应用的 hand 配置，则立即应用
+        try:
+            if self._pending_hand_config_name:
+                name = self._pending_hand_config_name
+                self._pending_hand_config_name = None
+                print(f"OptimizationThread: 检测到待应用 hand 配置 _pending_hand_config_name='{name}'，现在应用。")
+                self.apply_hand_config(name)
+        except Exception:
+            pass
 
     @pyqtSlot(list)
     def set_visual_link_names(self, link_names: list[str]) -> None:
